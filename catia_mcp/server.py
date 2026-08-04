@@ -130,16 +130,20 @@ def close_cad_document(
     Prepare an action to close one or more open CATIA documents.
 
     Use targetMode="active" when the user refers to the active,
-    current, or currently focused CATIA document.
+    current, or currently focused CATIA document. Also use
+    targetMode="active" when the user asks to close the open
+    document and exactly one CATIA document is currently open.
 
-    Use targetMode="named" when the user explicitly provides a
-    document name. documentName is required in that case.
+    Use targetMode="named" when the user explicitly provides or
+    resolves a document name. documentName is required in that
+    case; preserve it exactly as provided or resolved.
 
     Use targetMode="all" only when the user explicitly asks to
     close all open CATIA documents.
 
     Do not use this tool when the user merely says "close a
-    document" or "close document" without identifying a document.
+    document" or "close document" without identifying a document,
+    or when more than one document is open and none is specified.
     Ask the user which document should be closed instead.
 
     This tool prepares an action for the external WPF C# executor.

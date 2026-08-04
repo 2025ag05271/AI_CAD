@@ -237,8 +237,11 @@ async def plan_catia_action(
 
                     "Call an available tool only when the user's request "
                     "requires performing a CATIA action that a tool "
-                    "supports. The available tools were discovered from "
-                    "the approved CATIA MCP server. "
+                    "supports. Each tool's own description explains "
+                    "exactly when and how to use it; follow those "
+                    "descriptions precisely rather than guessing. The "
+                    "available tools were discovered from the approved "
+                    "CATIA MCP server. "
 
                     "If the user's message is a greeting, general "
                     "question, request for explanation, or anything else "
@@ -250,48 +253,16 @@ async def plan_catia_action(
                     "available tool supports it, do not call a tool and "
                     "do not call route_to_general_chat either. "
 
-                    "For close-document requests, follow these rules: "
-                    "Use close_cad_document with targetMode='active' "
-                    "when the user says this document, current document, "
-                    "active document, or currently focused document. "
+                    "When a tool argument identifies a document and the "
+                    "user refers to it using an ordinal (the first one, "
+                    "the second one) or a pronoun (it, that document, "
+                    "that one), resolve the reference using the "
+                    "conversation history below instead of asking again. "
 
-                    "Use targetMode='named' when the user explicitly "
-                    "provides a document name. Preserve that name exactly "
-                    "in documentName. "
-
-                    "Use targetMode='all' only when the user explicitly "
-                    "asks to close all documents. "
-
-                    "If the user refers to a previously mentioned document "
-                    "using an ordinal (the first one, the second one) or a "
-                    "pronoun (it, that document, that one), resolve the "
-                    "reference using the conversation history below and use "
-                    "targetMode='named' with the exact resolved document "
-                    "name. "
-
-                    "If the user says only close document, close a "
-                    "document, or otherwise fails to identify the target "
-                    "and it cannot be resolved from history, use "
-                    "request_clarification and ask which document "
-                    "should be closed. "
-
-                    "If the user says close the document which is open "
-                    "and the CATIA context shows exactly one open document, "
-                    "use targetMode='active'. If multiple documents are "
-                    "open, request clarification. "
-
-                    "For document-creation requests, follow these rules: "
-                    "Use create_cad_document when the user asks to create, "
-                    "start, or make a new CATIA document. Map part requests "
-                    "to documentType='CATPart', product or assembly "
-                    "requests to documentType='CATProduct', and drawing "
-                    "requests to documentType='CATDrawing'. Do not require "
-                    "a file path for this tool; the new document is unsaved "
-                    "until the user explicitly saves it. "
-
-                    "Do not invent document names. "
-                    "Do not treat all as active or named. "
-                    "Select exactly one available tool when possible."
+                    "Do not invent document names, file paths, or other "
+                    "arguments that were not stated or resolved from "
+                    "context. Select exactly one available tool when "
+                    "possible."
                 ),
             },
             {

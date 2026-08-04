@@ -721,6 +721,30 @@ save_document_as
 close_without_saving
 ```
 
+### When to split into a supervisor and specialized sub-agents
+
+The current design intentionally uses a single planner: one system prompt
+and one tool list, with all tool-specific behavior living in each MCP
+tool's own docstring rather than the shared prompt (see `catia_mcp/server.py`).
+This keeps the shared prompt's size independent of tool count and resolves
+chat-vs-agentic routing plus tool selection in a single Ollama call.
+
+Do not split this into a supervisor plus specialized sub-agents just
+because the tool count grows. At the current tool count, every tool belongs
+to one domain (CATIA document lifecycle), so a supervisor would have
+nothing meaningful to route between, and it would add a second sequential
+model call to every agentic message for no behavioral benefit.
+
+The real trigger is the first modifying or persistent operation above
+(`move_component`, `change_parameter`, `save_document`, and similar). Those
+need a fundamentally different policy than today's read and lifecycle
+tools: an approval or confirmation gate, preview, and audit logging. That
+is the point to introduce a second planner (for example,
+`modifying_operations_planner`) with its own system prompt and an
+interrupt-based approval step, behind a thin supervisor that routes based
+on risk category. Split then because of differing safety requirements, not
+because of prompt length or tool count alone.
+
 ## 17. Production considerations
 
 Before production use, address:
