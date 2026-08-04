@@ -28,12 +28,36 @@ class CatiaAgentState(TypedDict, total=False):
 
     catia_context: CatiaContext
 
+    messages: list[dict[str, str]]
+
     planner_result: PlannerResult
 
     pending_action: dict[str, Any]
     action_result: dict[str, Any]
 
     final_response: dict[str, Any]
+
+
+# ---------------------------------------------------------
+# Conversation history helper
+# ---------------------------------------------------------
+
+def _record_conversation_turn(
+    state: CatiaAgentState,
+    assistant_message: str,
+) -> list[dict[str, str]]:
+    """Append this turn so the next planner call sees it as history."""
+
+    history = list(state.get("messages", []))
+
+    history.append(
+        {"role": "user", "content": state["user_message"]}
+    )
+    history.append(
+        {"role": "assistant", "content": assistant_message}
+    )
+
+    return history
 
 
 # ---------------------------------------------------------
@@ -59,6 +83,7 @@ async def plan_action_node(
     planner_result = await plan_catia_action(
         user_command=user_message,
         catia_context=state.get("catia_context"),
+        conversation_history=state.get("messages", []),
     )
 
     return {
@@ -149,6 +174,9 @@ def prepare_completion_node(
 
         return {
             "final_response": final_response,
+            "messages": _record_conversation_turn(
+                state, final_response["message"]
+            ),
         }
 
     action_name = pending_action["action"]["action"]
@@ -234,6 +262,9 @@ def prepare_completion_node(
 
     return {
         "final_response": final_response,
+        "messages": _record_conversation_turn(
+            state, final_response["message"]
+        ),
     }
 
 
@@ -263,6 +294,9 @@ def prepare_terminal_response_node(
 
     return {
         "final_response": final_response,
+        "messages": _record_conversation_turn(
+            state, final_response["message"]
+        ),
     }
 
 
@@ -363,6 +397,16 @@ catia_agent_graph = graph_builder.compile(
 
 
 # ---------------------------------------------------------
+# Run-to-session mapping
+# ---------------------------------------------------------
+
+# The LangGraph thread is keyed by session, not run, so the
+# action-results endpoint (which only receives a runId) needs this
+# lookup to find the right session thread. Process-local only.
+_run_sessions: dict[str, str] = {}
+
+
+# ---------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------
 
@@ -371,14 +415,25 @@ async def start_catia_agent(
     user_message: str,
     catia_context: CatiaContext | None = None,
 ) -> dict[str, Any]:
-    
-    run_id = str(uuid4())
 
     config = {
         "configurable": {
-            "thread_id": run_id,
+            "thread_id": session_id,
         }
     }
+
+    existing_snapshot = catia_agent_graph.get_state(config) # type: ignore
+
+    if existing_snapshot.values and existing_snapshot.next == (
+        "await_action_result",
+    ):
+        raise ValueError(
+            "This session already has a pending CATIA action. "
+            "Submit its result before starting a new command."
+        )
+
+    run_id = str(uuid4())
+    _run_sessions[run_id] = session_id
 
     result = await catia_agent_graph.ainvoke(
         {
@@ -395,6 +450,8 @@ async def start_catia_agent(
     if interrupts:
         return interrupts[0].value
 
+    _run_sessions.pop(run_id, None)
+
     return result["final_response"]
 
 
@@ -402,9 +459,17 @@ async def resume_catia_agent(
     run_id: str,
     action_result: ActionExecutionResultRequest,
 ) -> dict[str, Any]:
+    session_id = _run_sessions.get(run_id)
+
+    if session_id is None:
+        raise KeyError(
+            f"No pending Agent run was found for runId: "
+            f"{run_id}"
+        )
+
     config = {
         "configurable": {
-            "thread_id": run_id,
+            "thread_id": session_id,
         }
     }
 
@@ -414,6 +479,12 @@ async def resume_catia_agent(
         raise KeyError(
             f"No pending Agent run was found for runId: "
             f"{run_id}"
+        )
+
+    if snapshot.values.get("run_id") != run_id:
+        raise ValueError(
+            "This action result does not match the "
+            "currently pending Agent run for this session."
         )
 
     if snapshot.next != (
@@ -430,6 +501,8 @@ async def resume_catia_agent(
         ),
         config=config, # type: ignore
     )
+
+    _run_sessions.pop(run_id, None)
 
     if result.get("__interrupt__"):
         return result["__interrupt__"][0].value

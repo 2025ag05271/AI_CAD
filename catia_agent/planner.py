@@ -9,9 +9,11 @@ from catia_agent.models import (
     ClarificationRequiredResult,
     CloseCadDocumentAction,
     GetActiveDocumentAction,
+    NonAgenticResult,
     OpenCadDocumentAction,
     PlannerResult,
     RequestClarificationAction,
+    RouteToGeneralChatAction,
     UnsupportedRequestResult,
 )
 from catia_agent.mcp_tools import (
@@ -96,6 +98,11 @@ def create_typed_action(
 
     if tool_name == "request_clarification":
         return RequestClarificationAction.model_validate(
+            raw_action
+        )
+
+    if tool_name == "route_to_general_chat":
+        return RouteToGeneralChatAction.model_validate(
             raw_action
         )
 
@@ -184,6 +191,7 @@ def validate_close_cad_document(
 async def plan_catia_action(
     user_command: str,
     catia_context: CatiaContext | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
 ) -> PlannerResult:
     
     ollama_tools = await load_ollama_tools_from_mcp()
@@ -191,6 +199,11 @@ async def plan_catia_action(
     context_message = build_catia_context_message(
         catia_context
     )
+
+    history = conversation_history or []
+    trimmed_history = history[
+        -settings.max_conversation_history_messages:
+    ]
     
     logger.info(
         "qwen_tool_selection_started",
@@ -198,6 +211,9 @@ async def plan_catia_action(
             "model": MODEL_NAME,
             "availableToolCount": len(
                 ollama_tools
+            ),
+            "historyMessageCount": len(
+                trimmed_history
             ),
         },
     )
@@ -208,9 +224,25 @@ async def plan_catia_action(
             {
                 "role": "system",
                 "content": (
-                    "You are a CATIA command planner. "
-                    "The available tools were discovered from the "
-                    "approved CATIA MCP server. "
+                    "You are the orchestrator for a CATIA engineering "
+                    "assistant. For every user message, first decide "
+                    "whether it requires a CATIA action or is a general "
+                    "conversational query, then respond accordingly. "
+
+                    "Call an available tool only when the user's request "
+                    "requires performing a CATIA action that a tool "
+                    "supports. The available tools were discovered from "
+                    "the approved CATIA MCP server. "
+
+                    "If the user's message is a greeting, general "
+                    "question, request for explanation, or anything else "
+                    "that does not require a CATIA action, call "
+                    "route_to_general_chat. Do not answer the question "
+                    "yourself and do not generate a conversational reply. "
+
+                    "If the request clearly needs a CATIA action but no "
+                    "available tool supports it, do not call a tool and "
+                    "do not call route_to_general_chat either. "
 
                     "For close-document requests, follow these rules: "
                     "Use close_cad_document with targetMode='active' "
@@ -224,9 +256,17 @@ async def plan_catia_action(
                     "Use targetMode='all' only when the user explicitly "
                     "asks to close all documents. "
 
+                    "If the user refers to a previously mentioned document "
+                    "using an ordinal (the first one, the second one) or a "
+                    "pronoun (it, that document, that one), resolve the "
+                    "reference using the conversation history below and use "
+                    "targetMode='named' with the exact resolved document "
+                    "name. "
+
                     "If the user says only close document, close a "
-                    "document, or otherwise fails to identify the target, "
-                    "use request_clarification and ask which document "
+                    "document, or otherwise fails to identify the target "
+                    "and it cannot be resolved from history, use "
+                    "request_clarification and ask which document "
                     "should be closed. "
 
                     "If the user says close the document which is open "
@@ -236,14 +276,14 @@ async def plan_catia_action(
 
                     "Do not invent document names. "
                     "Do not treat all as active or named. "
-                    "Select exactly one available tool when possible. "
-                    "If the request is unsupported, do not call a tool."
+                    "Select exactly one available tool when possible."
                 ),
             },
             {
                 "role": "system",
                 "content": context_message,
             },
+            *trimmed_history,
             {
                 "role": "user",
                 "content": user_command,
@@ -307,6 +347,25 @@ async def plan_catia_action(
             message=typed_action.arguments.question,
             missingField=(
                 typed_action.arguments.missingField
+            ),
+        )
+
+    if isinstance(
+        typed_action,
+        RouteToGeneralChatAction,
+    ):
+        logger.info(
+            "orchestrator_routed_to_general_chat",
+            extra={
+                "model": MODEL_NAME,
+            },
+        )
+
+        return NonAgenticResult(
+            status="non_agentic",
+            message=(
+                "This request does not require a CATIA action. "
+                "Route it to the general chat service."
             ),
         )
 

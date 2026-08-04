@@ -103,6 +103,7 @@ catia-agent-poc/
 |-- .gitignore
 |-- app.py
 |-- run_api.py
+|-- show_graph.py
 |
 |-- catia_agent/
 |   |-- __init__.py
@@ -113,22 +114,14 @@ catia-agent-poc/
 |   |-- models.py
 |   |-- planner.py
 |   |-- readiness.py
+|   |-- tool_registry_legacy.py
 |
 |-- catia_mcp/
 |   |-- __init__.py
 |   |-- server.py
-|
-|-- tests/
-|   |-- __init__.py
-|   |-- test_agent_api.py
-|   |-- test_health_api.py
-|   |-- test_live_integration.py
-|   |-- test_planner_validation.py
-|
-|-- test_mcp_call.py
-|-- test_mcp_discovery.py
-|-- test_planner.py
 ```
+
+The automated test suite was removed from this POC. Validate behavior manually through Swagger, Postman, and `show_graph.py` instead (see Section 15, Step 7).
 
 The older hard-coded tool registry should be removed or retained only as a temporary legacy reference after MCP discovery is stable.
 
@@ -149,6 +142,7 @@ CATIA_AGENT_OLLAMA_MODEL=qwen3:4b
 
 CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
 CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
+CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES=20
 
 CATIA_AGENT_LOG_LEVEL=INFO
 CATIA_AGENT_ENABLE_JSON_LOGS=true
@@ -201,6 +195,10 @@ These endpoints expose MCP-discovered tool metadata through Swagger and Postman.
 POST /api/agent/runs
 ```
 
+The caller does not select a chat or agent mode. Every message goes through
+the same orchestrator, which decides whether the request needs a CATIA
+action or is a general conversational query (see Section 8.1).
+
 Example request:
 
 ```json
@@ -216,7 +214,7 @@ Example request:
 }
 ```
 
-Example response:
+Example agentic response:
 
 ```json
 {
@@ -232,6 +230,23 @@ Example response:
   }
 }
 ```
+
+Example chat response, for a message such as "what file types can you open?":
+
+```json
+{
+  "status": "non_agentic",
+  "sessionId": "session-001",
+  "runId": "generated-run-id",
+  "message": "This request does not require a CATIA action. Route it to the general chat service."
+}
+```
+
+On `non_agentic`, the Python backend has not answered the user's message and
+never will. The `.message` field is a routing note for logs, not an answer.
+The caller is responsible for sending the original message to its own
+general-purpose chat model (for example, GPT-4) and returning that answer to
+the user instead.
 
 ### Submit an execution result
 
@@ -281,7 +296,8 @@ START
   v
 plan_action
   |
-  +--> unsupported or invalid
+  +--> non_agentic, clarification_required,
+  |    unsupported, or invalid
   |       |
   |       v
   |   prepare_terminal_response
@@ -309,6 +325,33 @@ plan_action
          END
 ```
 
+### 8.1 Chat vs agentic orchestration
+
+The .NET client sends only the user message. It does not choose a chat or
+agent mode. Deciding that is the Python orchestrator's job, and Qwen only
+makes the routing decision. It never answers the user's message itself:
+
+- If Qwen selects a CATIA tool, the request is agentic. It proceeds through
+  `prepare_action` → `await_action_result` → `prepare_completion` exactly as
+  before.
+- If Qwen determines the request does not require a CATIA action (a
+  greeting, general question, or anything unrelated to CATIA), it must call
+  the `route_to_general_chat` meta-tool instead of answering. This returns
+  `non_agentic` through `prepare_terminal_response`. The `.message` field is
+  a routing note, not an answer, and the caller must route the original
+  message to a separate general-purpose chat model (for example, GPT-4) and
+  return that model's answer to the user.
+- If the request clearly needs a CATIA action but no available tool
+  supports it yet, Qwen calls no tool at all, and the fallback
+  `unsupported_request` result is returned. This case stays internal and is
+  not rerouted, because it is still CATIA-specific, just not implemented.
+
+Routing through an explicit tool call (`route_to_general_chat`) rather than
+parsing free-form text keeps the decision structured and reliable, matches
+how every other decision in this codebase is made (typed tool calls, never
+free text), and avoids spending tokens on an answer that would only be
+discarded. See `catia_agent/planner.py` and `catia_mcp/server.py`.
+
 ### State fields
 
 Typical state contains:
@@ -319,23 +362,41 @@ run_id
 action_id
 user_message
 catia_context
+messages
 planner_result
 pending_action
 action_result
 final_response
 ```
 
+`messages` accumulates the conversation as `{"role", "content"}` pairs after
+every completed or terminal turn. The planner receives a trimmed window of
+this history (`CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES`) so it can
+resolve references such as "the first one" or "that document" against what
+the Agent previously said.
+
 ### Identifier semantics
 
-- `sessionId` identifies the conversation or client session.
-- `runId` identifies one Agent workflow.
+- `sessionId` identifies the conversation or client session. It is now the
+  LangGraph thread key, so conversation history persists across multiple
+  Agent runs within the same session.
+- `runId` identifies one Agent workflow within a session.
 - `actionId` identifies one externally executed CATIA action.
 
 A future multi-action workflow can use one `runId` with multiple `actionId` values.
 
+Because the thread is keyed by `sessionId` rather than `runId`, the
+action-results endpoint (which only receives a `runId`) resolves the owning
+session through an in-memory `runId -> sessionId` map in `graph.py`. Starting
+a new run while a session still has a pending action result raises a
+validation error instead of silently overwriting the paused state.
+
 ### Persistence limitation
 
-The POC uses `InMemorySaver`. Pending runs are lost when FastAPI restarts or Uvicorn reloads. Before production use, replace it with a persistent checkpointer such as SQLite or an approved enterprise data store.
+The POC uses `InMemorySaver`. Conversation history, pending runs, and the
+`runId -> sessionId` map are all lost when FastAPI restarts or Uvicorn
+reloads. Before production use, replace the checkpointer with a persistent
+store such as SQLite or an approved enterprise data store.
 
 ## 9. Native Qwen tool calling
 
@@ -377,6 +438,21 @@ The MCP server is the authoritative source for:
 - Tool discovery
 
 The MCP server does not call CATIA in the current Option 1 architecture. It prepares typed action data for the external WPF and C# executor.
+
+### Currently implemented tools
+
+```text
+open_cad_document       Opens a CATPart, CATProduct, or CATDrawing by absolute path.
+get_active_document     Requests the active CATIA document from the executor.
+close_cad_document      Closes the active, a named, or all open documents.
+request_clarification   Asks the user for a missing detail (for example, which
+                        document to close). Handled entirely inside the Python
+                        Agent workflow and is never sent to the C# executor.
+route_to_general_chat   Signals that the message is not a CATIA action. Handled
+                        entirely inside the Python Agent workflow. The caller
+                        must reroute the original message to a separate
+                        general-purpose chat model; Python does not answer it.
+```
 
 ### MCP discovery flow
 

@@ -56,6 +56,15 @@ class RequestClarificationAction(BaseModel):
     arguments: RequestClarificationArguments
 
 
+class RouteToGeneralChatArguments(BaseModel):
+    pass
+
+
+class RouteToGeneralChatAction(BaseModel):
+    action: Literal["route_to_general_chat"]
+    arguments: RouteToGeneralChatArguments
+
+
 # ---------------------------------------------------------
 # Planner results
 # ---------------------------------------------------------
@@ -78,8 +87,13 @@ class ClarificationRequiredResult(BaseModel):
     message: str
     missingField: str
 
+class NonAgenticResult(BaseModel):
+    status: Literal["non_agentic"]
+    message: str
+
 PlannerResult = (
     ActionRequiredResult
+    | NonAgenticResult
     | ClarificationRequiredResult
     | UnsupportedRequestResult
     | InvalidRequestResult

@@ -39,6 +39,11 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    max_conversation_history_messages: int = Field(
+        default=20,
+        gt=0,
+    )
+
     log_level: Literal[
         "DEBUG",
         "INFO",

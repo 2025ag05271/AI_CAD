@@ -192,8 +192,13 @@ def get_health() -> dict:
     "/api/agent/runs",
     summary="Start a CATIA Agent run",
     description=(
-        "Interpret a natural-language CATIA command and "
-        "return a validated action for external execution."
+        "Interpret a natural-language message and either return a "
+        "validated CATIA action for external execution, or a "
+        "non_agentic routing decision when the message does not "
+        "require a CATIA action. The orchestrator decides which of "
+        "the two applies; callers do not need to select a mode. On "
+        "non_agentic, the caller is responsible for routing the "
+        "original message to its own general-purpose chat model."
     ),
     tags=["Agent Runs"],
 )

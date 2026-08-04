@@ -171,6 +171,30 @@ def request_clarification(
     }
 
 
+@mcp.tool
+def route_to_general_chat() -> dict[str, Any]:
+    """
+    Signal that this message does not require a CATIA action.
+
+    Use this tool for greetings, general questions, requests for
+    explanation, or anything else unrelated to the CATIA tools above.
+
+    Do not attempt to answer the user's question yourself. Call this
+    tool instead and let a separate general-purpose assistant respond.
+
+    This tool is handled by the Python Agent workflow. It must never
+    be sent to the C# CATIA executor.
+    """
+
+    return {
+        "status": "non_agentic",
+        "action": "route_to_general_chat",
+        "arguments": {},
+        "executor": "external_chat_llm",
+        "executed": False,
+    }
+
+
 if __name__ == "__main__":
     mcp.run(
         transport="http",
