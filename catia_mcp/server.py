@@ -88,6 +88,40 @@ def get_active_document() -> dict[str, Any]:
 
 
 @mcp.tool
+def create_cad_document(
+    documentType: Literal["CATProduct", "CATPart", "CATDrawing"],
+) -> dict[str, Any]:
+    """
+    Prepare an action to create a new CATIA document.
+
+    Use this tool when the user asks to create, start, or make a new
+    CATIA part, product, assembly, or drawing document.
+
+    Map "part" to CATPart, "product" or "assembly" to CATProduct, and
+    "drawing" to CATDrawing.
+
+    This tool does not require a file path. The new document is created
+    unsaved in CATIA; saving it to disk is a separate action.
+
+    This tool does not create the document itself. It returns a validated
+    action for execution by the external WPF C# CATIA executor.
+
+    Args:
+        documentType: The type of CATIA document to create.
+    """
+
+    return {
+        "status": "action_prepared",
+        "action": "create_cad_document",
+        "arguments": {
+            "documentType": documentType,
+        },
+        "executor": "wpf_csharp",
+        "executed": False,
+    }
+
+
+@mcp.tool
 def close_cad_document(
     targetMode: Literal["active", "named", "all"],
     documentName: str | None = None,

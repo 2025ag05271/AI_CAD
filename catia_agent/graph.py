@@ -245,7 +245,24 @@ def prepare_completion_node(
                 f"{closed_count} CATIA documents were "
                 "closed successfully."
             )
-    
+
+    elif action_name == "create_cad_document":
+        document_name = None
+
+        if result_data:
+            document_name = result_data.get(
+                "documentName"
+            )
+
+        if document_name:
+            message = (
+                f"{document_name} was created successfully."
+            )
+        else:
+            message = (
+                "A new CATIA document was created successfully."
+            )
+
     else:
         message = (
             "The CATIA action completed successfully."

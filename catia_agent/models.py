@@ -40,10 +40,22 @@ class CloseCadDocumentAction(BaseModel):
     action: Literal["close_cad_document"]
     arguments: CloseCadDocumentArguments
 
+class CreateCadDocumentArguments(BaseModel):
+    documentType: Literal[
+        "CATProduct",
+        "CATPart",
+        "CATDrawing",
+    ]
+
+class CreateCadDocumentAction(BaseModel):
+    action: Literal["create_cad_document"]
+    arguments: CreateCadDocumentArguments
+
 CatiaAction = (
     OpenCadDocumentAction
     | GetActiveDocumentAction
     | CloseCadDocumentAction
+    | CreateCadDocumentAction
 )
 
 class RequestClarificationArguments(BaseModel):

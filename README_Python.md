@@ -445,6 +445,9 @@ The MCP server does not call CATIA in the current Option 1 architecture. It prep
 open_cad_document       Opens a CATPart, CATProduct, or CATDrawing by absolute path.
 get_active_document     Requests the active CATIA document from the executor.
 close_cad_document      Closes the active, a named, or all open documents.
+create_cad_document     Creates a new, unsaved CATPart, CATProduct, or
+                        CATDrawing document. Takes no file path; saving is
+                        a separate action.
 request_clarification   Asks the user for a missing detail (for example, which
                         document to close). Handled entirely inside the Python
                         Agent workflow and is never sent to the C# executor.

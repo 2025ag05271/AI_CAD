@@ -235,7 +235,9 @@ Keep `[STAThread]` on `Main`. Use a synchronous `Main` with `GetAwaiter().GetRes
   },
   "CatiaAgentTools": {
     "OpenCadDocumentEnabled": true,
-    "GetActiveDocumentEnabled": true
+    "GetActiveDocumentEnabled": true,
+    "CloseCadDocumentEnabled": true,
+    "CreateCadDocumentEnabled": true
   },
   "Logging": {
     "LogLevel": {
@@ -500,6 +502,9 @@ return action.Name switch
     "get_active_document" when toolOptions.GetActiveDocumentEnabled =>
         await ExecuteGetActiveDocumentAsync(...),
 
+    "create_cad_document" when toolOptions.CreateCadDocumentEnabled =>
+        await ExecuteCreateCadDocumentAsync(...),
+
     "open_cad_document" =>
         ActionExecutionResultRequest.Failed(
             actionId,
@@ -662,6 +667,28 @@ Then call the existing CATIA COM logic and return:
 ### `get_active_document`
 
 Return the active document name, path, and type. If CATIA has no open document, return a successful result with null document fields. The Python completion node can convert this into a friendly message.
+
+### `create_cad_document`
+
+C# should validate:
+
+- `documentType` is one of `CATProduct`, `CATPart`, or `CATDrawing`.
+
+Then call the existing CATIA COM logic (for example, `Documents.Add(...)`)
+and return:
+
+```json
+{
+  "documentName": "Part1.CATPart",
+  "fullPath": null,
+  "documentType": "CATPart"
+}
+```
+
+A newly created document has no `fullPath` until it is saved. Return
+`null` rather than omitting the field, so the DTO shape stays consistent
+with `open_cad_document`. This tool only creates the in-memory document;
+saving it to disk is a separate, not-yet-implemented tool.
 
 ## 16. Adding a new tool
 

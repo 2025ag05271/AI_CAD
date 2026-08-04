@@ -8,6 +8,7 @@ from catia_agent.models import (
     CatiaContext,
     ClarificationRequiredResult,
     CloseCadDocumentAction,
+    CreateCadDocumentAction,
     GetActiveDocumentAction,
     NonAgenticResult,
     OpenCadDocumentAction,
@@ -95,6 +96,11 @@ def create_typed_action(
 
         validate_close_cad_document(action)
         return action
+
+    if tool_name == "create_cad_document":
+        return CreateCadDocumentAction.model_validate(
+            raw_action
+        )
 
     if tool_name == "request_clarification":
         return RequestClarificationAction.model_validate(
@@ -273,6 +279,15 @@ async def plan_catia_action(
                     "and the CATIA context shows exactly one open document, "
                     "use targetMode='active'. If multiple documents are "
                     "open, request clarification. "
+
+                    "For document-creation requests, follow these rules: "
+                    "Use create_cad_document when the user asks to create, "
+                    "start, or make a new CATIA document. Map part requests "
+                    "to documentType='CATPart', product or assembly "
+                    "requests to documentType='CATProduct', and drawing "
+                    "requests to documentType='CATDrawing'. Do not require "
+                    "a file path for this tool; the new document is unsaved "
+                    "until the user explicitly saves it. "
 
                     "Do not invent document names. "
                     "Do not treat all as active or named. "
