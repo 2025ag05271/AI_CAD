@@ -102,6 +102,9 @@ catia-agent-poc/
 |-- .env.example
 |-- .gitignore
 |-- app.py
+|-- pytest.ini
+|-- README_.NET.md
+|-- README_Python.md
 |-- run_api.py
 |-- show_graph.py
 |
@@ -119,9 +122,24 @@ catia-agent-poc/
 |-- catia_mcp/
 |   |-- __init__.py
 |   |-- server.py
+|
+|-- tests/
+|   |-- __init__.py
+|   |-- test_agent_api.py
+|   |-- test_graph.py
+|   |-- test_health_api.py
+|   |-- test_mcp_server.py
+|   |-- test_mcp_tools.py
+|   |-- test_models.py
+|   |-- test_planner.py
+|   |-- test_readiness.py
 ```
 
-The automated test suite was removed from this POC. Validate behavior manually through Swagger, Postman, and `show_graph.py` instead (see Section 15, Step 7).
+Automated tests live under `tests/` and are run with `pytest` (configured
+by `pytest.ini`). Tests marked `integration` require a local Ollama and the
+CATIA MCP server; the rest run without them. `show_graph.py` remains useful
+for visualizing the compiled LangGraph, and Swagger and Postman are still
+the recommended way to exercise the API end-to-end.
 
 The older hard-coded tool registry should be removed or retained only as a temporary legacy reference after MCP discovery is stable.
 
@@ -143,6 +161,7 @@ CATIA_AGENT_OLLAMA_MODEL=qwen3:4b
 CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
 CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
 CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES=20
+CATIA_AGENT_MAX_ACTIONS_PER_RUN=20
 
 CATIA_AGENT_LOG_LEVEL=INFO
 CATIA_AGENT_ENABLE_JSON_LOGS=true
@@ -248,6 +267,42 @@ The caller is responsible for sending the original message to its own
 general-purpose chat model (for example, GPT-4) and returning that answer to
 the user instead.
 
+Example response after a multi-action request such as "open Gearbox.CATProduct
+and then close it" completes both steps (see Section 8.2):
+
+```json
+{
+  "status": "completed",
+  "sessionId": "session-001",
+  "runId": "generated-run-id",
+  "actionId": "generated-action-id-2",
+  "message": "Gearbox.CATProduct was opened successfully. Gearbox.CATProduct was closed successfully.",
+  "data": {
+    "closedDocuments": ["Gearbox.CATProduct"]
+  },
+  "completedActions": [
+    {
+      "action": "open_cad_document",
+      "actionId": "generated-action-id-1",
+      "message": "Gearbox.CATProduct was opened successfully.",
+      "data": {"documentName": "Gearbox.CATProduct"}
+    },
+    {
+      "action": "close_cad_document",
+      "actionId": "generated-action-id-2",
+      "message": "Gearbox.CATProduct was closed successfully.",
+      "data": {"closedDocuments": ["Gearbox.CATProduct"]}
+    }
+  ]
+}
+```
+
+`completedActions` appears on any terminal response (`completed`,
+`execution_failed`, `non_agentic`, `clarification_required`,
+`unsupported_request`) once at least one action in the sequence has already
+succeeded. It is omitted entirely when the sequence never got past the
+first step.
+
 ### Submit an execution result
 
 ```http
@@ -286,6 +341,41 @@ Example completion:
 }
 ```
 
+### 7.5 Error contract
+
+Every non-2xx response from `POST /api/agent/runs` and
+`POST /api/agent/runs/{runId}/action-results` uses the same envelope:
+
+```json
+{
+  "detail": {
+    "status": "<short_status>",
+    "errorCode": "<STABLE_CODE>",
+    "message": "<human-readable>"
+  }
+}
+```
+
+Stable error codes and the endpoints that produce them:
+
+| HTTP | errorCode                       | Where                | Meaning                                                                                                    |
+|------|---------------------------------|----------------------|------------------------------------------------------------------------------------------------------------|
+| 400  | `ACTION_VALIDATION_FAILED`      | `/runs`              | Deterministic Python policy rejected the model-selected action (path, extension, argument shape, and so on). |
+| 409  | `AGENT_RUN_STATE_CONFLICT`      | `/runs`, action-results | The session or run is not in a state compatible with the request (see Section 8, run-state guards).       |
+| 404  | `AGENT_RUN_NOT_FOUND`           | action-results       | No pending run matches the supplied `runId`.                                                               |
+| 422  | `ACTION_RESULT_VALIDATION_FAILED` | action-results     | The submitted `ActionExecutionResultRequest` failed Pydantic validation.                                    |
+| 422  | `TOOL_SCHEMA_VALIDATION_FAILED` | `/runs`              | Qwen returned a tool call that did not match the required Pydantic action model.                            |
+| 422  | `AGENT_RUN_RESUME_FAILED`       | action-results       | A planner or validation error raised during resume that is not a state conflict.                            |
+| 503  | `MCP_TOOL_DISCOVERY_FAILED`     | both                 | The MCP server was unreachable or returned no usable tool catalog.                                          |
+| 503  | `OLLAMA_REQUEST_FAILED`         | both                 | Ollama returned an error while planning.                                                                    |
+| 503  | `OLLAMA_CONNECTION_FAILED`      | both                 | The Ollama process could not be reached at all.                                                             |
+
+`AGENT_RUN_STATE_CONFLICT` is deliberately narrow — only three specific
+run-state guards raise it (see Section 8). Planner and executor errors
+during resume surface as `AGENT_RUN_RESUME_FAILED` instead, so the .NET
+client can distinguish "the run is in the wrong state" from "the planner
+crashed" and route them differently in the UI.
+
 ## 8. LangGraph workflow
 
 The current graph follows this state machine:
@@ -297,10 +387,18 @@ START
 plan_action
   |
   +--> non_agentic, clarification_required,
-  |    unsupported, or invalid
+  |    unsupported (first action), or invalid
   |       |
   |       v
   |   prepare_terminal_response
+  |       |
+  |       v
+  |      END
+  |
+  +--> unsupported (mid-sequence, nothing left to do)
+  |       |
+  |       v
+  |   prepare_sequence_completed_response
   |       |
   |       v
   |      END
@@ -319,10 +417,11 @@ plan_action
           |
           | resume with Command(resume=...)
           v
-      prepare_completion
+      prepare_completion (records the result)
           |
-          v
-         END
+          +--> failed --------------------> END
+          |
+          +--> succeeded, loop back ---> plan_action
 ```
 
 ### 8.1 Chat vs agentic orchestration
@@ -352,6 +451,71 @@ how every other decision in this codebase is made (typed tool calls, never
 free text), and avoids spending tokens on an answer that would only be
 discarded. See `catia_agent/planner.py` and `catia_mcp/server.py`.
 
+### 8.2 Sequential multi-action requests
+
+A single message can require more than one CATIA action, for example "open
+Gearbox.CATProduct and Frame.CATProduct, then close XYZ.CATPart". Qwen is
+not asked to enumerate every step up front. Instead, the planner is called
+again after each action succeeds, with that action's outcome added to the
+conversation context, so it can decide what (if anything) from the original
+request still remains:
+
+1. `plan_action` runs, Qwen proposes one action, it executes.
+2. On success, `prepare_completion` records the result and loops back to
+   `plan_action` instead of finishing.
+3. `plan_action` runs again with the original message plus a note of what
+   was just completed. If Qwen proposes another action, the loop repeats.
+   If Qwen decides nothing remains, the run finalizes as `completed` with
+   every step's message joined together.
+
+Four things can end the sequence early:
+
+- **A failure stops it immediately.** If any action fails, the run ends
+  right there as `execution_failed`. Actions not yet attempted are never
+  attempted. The response combines what succeeded so far with the failure.
+- **`request_clarification` or `route_to_general_chat` can appear
+  mid-sequence.** For example, "open Gearbox.CATProduct, then close a
+  document" completes the open, then asks which document to close via
+  `clarification_required`. Both stop the sequence the same way a failure
+  does, but with their own status instead of `execution_failed`.
+- **A duplicate-action guard stops repeats.** If the planner proposes an
+  action whose name AND arguments exactly match one already completed in
+  the same run, `plan_action` intercepts it before it dispatches, logs
+  `planner_duplicate_action_detected`, and finalizes the run as
+  `completed` with what has been done so far. This is the hard rail
+  against Qwen 3B re-selecting the just-completed tool on the follow-up
+  planning pass; it fires even if the model ignores the explicit
+  "do not repeat" system message described below.
+- **A safety cap (`CATIA_AGENT_MAX_ACTIONS_PER_RUN`, default 20) stops
+  runaway sequences.** If a planning error or model quirk keeps proposing
+  *different* actions indefinitely (bypassing the duplicate guard), the
+  run stops with `unsupported_request` once the cap is reached, reporting
+  everything completed up to that point.
+
+Every follow-up planning call after a successful action is given a
+dedicated system message listing the actions already completed in the
+run with their exact arguments, plus an explicit instruction not to
+repeat them. Small local models like Qwen 3B do not always obey this,
+which is why the duplicate-action guard above is enforced deterministically
+in the graph rather than left as a prompt hint. See `catia_agent/graph.py`
+and `catia_agent/planner.py`.
+
+When Qwen returns more than one tool call on the same planning pass
+(occasional Qwen 3B behavior on the follow-up call), the planner logs
+`qwen_multiple_tool_calls` and picks a real CATIA tool over the
+`route_to_general_chat` and `request_clarification` meta-tools. This
+keeps the run alive instead of failing the whole planning call, and
+matches the intent of the sequence loop: finish the compound request
+first, only route to general chat when nothing agentic remains.
+
+This calls the planner multiple times (once per action) rather than asking
+Qwen to return several tool calls in one response. Each call stays as
+simple and reliable as a single-action request; nothing about
+`plan_catia_action` itself changes to support this; the looping and
+progress-tracking live entirely in `graph.py`. See Section 16 for why this
+is not the same thing as splitting into a supervisor and specialized
+sub-agents.
+
 ### State fields
 
 Typical state contains:
@@ -366,6 +530,9 @@ messages
 planner_result
 pending_action
 action_result
+completed_actions
+sequence_progress
+sequence_capped
 final_response
 ```
 
@@ -375,21 +542,43 @@ this history (`CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES`) so it can
 resolve references such as "the first one" or "that document" against what
 the Agent previously said.
 
+`completed_actions` and `sequence_progress` exist only for the lifetime of
+one run (see Section 8.2). `completed_actions` accumulates a structured
+entry per successful action (`action`, `actionId`, `arguments`, `message`,
+`data`) for the final `completedActions` response field and for the
+duplicate-action guard in `plan_action`. `sequence_progress` holds one
+short assistant-role turn per completed action so the planner sees
+progress on its next call within the same run. Both are reset to empty at
+the start of every new run; they are never carried over into
+session-level `messages` history.
+
 ### Identifier semantics
 
 - `sessionId` identifies the conversation or client session. It is now the
   LangGraph thread key, so conversation history persists across multiple
   Agent runs within the same session.
-- `runId` identifies one Agent workflow within a session.
-- `actionId` identifies one externally executed CATIA action.
-
-A future multi-action workflow can use one `runId` with multiple `actionId` values.
+- `runId` identifies one Agent workflow within a session, which may involve
+  more than one action (see Section 8.2).
+- `actionId` identifies one externally executed CATIA action. A single
+  `runId` can have several `actionId` values in sequence.
 
 Because the thread is keyed by `sessionId` rather than `runId`, the
 action-results endpoint (which only receives a `runId`) resolves the owning
-session through an in-memory `runId -> sessionId` map in `graph.py`. Starting
-a new run while a session still has a pending action result raises a
-validation error instead of silently overwriting the paused state.
+session through an in-memory `runId -> sessionId` map in `graph.py`. Three
+run-state guards are enforced through a dedicated `AgentRunStateConflictError`,
+which the API surfaces as HTTP 409 with `errorCode: AGENT_RUN_STATE_CONFLICT`:
+
+- Starting a new run on `POST /api/agent/runs` while the same session
+  still has a pending action result.
+- Submitting an action result whose `runId` does not match the currently
+  pending run for that session.
+- Submitting an action result to a run that is not paused at
+  `await_action_result`.
+
+Any other error surfaced from the resume path (planner validation, MCP
+unavailability, Ollama connection failure, unknown-tool policy rejection)
+is mapped to its own dedicated status code and error code so it cannot be
+mistaken for a state conflict. See Section 7.5.
 
 ### Persistence limitation
 
@@ -529,6 +718,12 @@ Examples of deterministic Python validation:
 - Exact typed action model required
 - Unknown MCP tools rejected until explicitly integrated
 - Returned `actionId` must match the pending action
+- Duplicate-action guard: an action whose name and arguments exactly
+  match one already completed in the current run is intercepted before
+  dispatch and finalizes the run (see Section 8.2)
+- Parallel tool calls fall back to a single primary tool: a real CATIA
+  action is preferred over the `route_to_general_chat` and
+  `request_clarification` meta-tools (see Section 8.2)
 
 ## 13. Logging and observability
 
@@ -555,9 +750,13 @@ mcp_tool_discovery_completed
 mcp_tool_cache_refreshed
 qwen_tool_selection_started
 qwen_tool_selected
+qwen_no_matching_tool
+qwen_multiple_tool_calls
+planner_duplicate_action_detected
 agent_run_planned
 action_result_received
 agent_run_resumed
+agent_run_resume_failed
 http_request_completed
 ```
 
@@ -722,6 +921,12 @@ close_without_saving
 ```
 
 ### When to split into a supervisor and specialized sub-agents
+
+Do not confuse this with the sequential multi-action loop in Section 8.2.
+That loop still uses one planner, one system prompt, and one tool list; it
+just calls the planner more than once for a single compound message. A
+supervisor and sub-agent split is a different thing: multiple *distinct*
+planners, each with its own system prompt and its own subset of tools.
 
 The current design intentionally uses a single planner: one system prompt
 and one tool list, with all tool-specific behavior living in each MCP

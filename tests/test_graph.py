@@ -11,17 +11,41 @@ from catia_agent.models import (
     CreateCadDocumentAction,
     NonAgenticResult,
     OpenCadDocumentAction,
+    UnsupportedRequestResult,
+)
+
+
+_SEQUENCE_COMPLETE = UnsupportedRequestResult(
+    status="unsupported_request",
+    message="No available CATIA tool supports this request.",
 )
 
 
 def _patch_planner(monkeypatch: pytest.MonkeyPatch, result):
+    """
+    Patch the planner with either one fixed result, or a list of
+    results consumed one per call (the last one repeats if the
+    planner is called more times than the list has entries).
+    """
+
+    results = result if isinstance(result, list) else [result]
+
     async def fake_plan_catia_action(
         user_command,
         catia_context=None,
         conversation_history=None,
+        completed_actions=None,
     ):
         fake_plan_catia_action.last_history = conversation_history
-        return result
+        fake_plan_catia_action.last_completed_actions = completed_actions
+        index = min(
+            fake_plan_catia_action.call_count,
+            len(results) - 1,
+        )
+        fake_plan_catia_action.call_count += 1
+        return results[index]
+
+    fake_plan_catia_action.call_count = 0
 
     monkeypatch.setattr(
         "catia_agent.graph.plan_catia_action",
@@ -131,7 +155,10 @@ async def test_action_required_pauses_the_graph(
 async def test_resume_completes_open_cad_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_planner(monkeypatch, _open_action_result())
+    _patch_planner(
+        monkeypatch,
+        [_open_action_result(), _SEQUENCE_COMPLETE],
+    )
 
     pending = await start_catia_agent(
         session_id=str(uuid4()),
@@ -190,7 +217,10 @@ async def test_resume_close_cad_document_reports_closed_count(
         ),
     )
 
-    _patch_planner(monkeypatch, close_action)
+    _patch_planner(
+        monkeypatch,
+        [close_action, _SEQUENCE_COMPLETE],
+    )
 
     pending = await start_catia_agent(
         session_id=str(uuid4()),
@@ -229,7 +259,10 @@ async def test_resume_create_cad_document_reports_new_name(
         ),
     )
 
-    _patch_planner(monkeypatch, create_action)
+    _patch_planner(
+        monkeypatch,
+        [create_action, _SEQUENCE_COMPLETE],
+    )
 
     pending = await start_catia_agent(
         session_id=str(uuid4()),
@@ -343,3 +376,302 @@ async def test_conversation_history_persists_across_turns(
         turn["role"] == "assistant"
         for turn in history
     )
+
+
+# ---------------------------------------------------------
+# Multi-action sequences within a single run
+# ---------------------------------------------------------
+
+def _close_action_result(target_mode: str = "all") -> ActionRequiredResult:
+    return ActionRequiredResult(
+        status="action_required",
+        action=CloseCadDocumentAction.model_validate(
+            {
+                "action": "close_cad_document",
+                "arguments": {"targetMode": target_mode},
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_sequence_chains_open_then_close_into_one_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [_open_action_result(), _close_action_result(), _SEQUENCE_COMPLETE],
+    )
+
+    session_id = str(uuid4())
+
+    pending_open = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox, then close it.",
+    )
+
+    assert pending_open["action"]["action"] == "open_cad_document"
+
+    pending_close = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    assert pending_close["status"] == "action_required"
+    assert pending_close["action"]["action"] == "close_cad_document"
+    assert pending_close["runId"] == pending_open["runId"]
+
+    result = await resume_catia_agent(
+        run_id=pending_close["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_close["actionId"],
+            success=True,
+            data={"closedDocuments": ["Gearbox.CATProduct"]},
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert "Gearbox.CATProduct was opened successfully." in result["message"]
+    assert "Gearbox.CATProduct was closed successfully." in result["message"]
+    assert len(result["completedActions"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_sequence_short_circuits_on_duplicate_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The planner proposes the same open with the same arguments twice.
+    # The duplicate-action guard should finalize the run after the first
+    # success instead of executing the same action again.
+    _patch_planner(
+        monkeypatch,
+        [_open_action_result(), _open_action_result()],
+    )
+
+    session_id = str(uuid4())
+
+    pending_open = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox.",
+    )
+
+    assert pending_open["action"]["action"] == "open_cad_document"
+
+    result = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert len(result["completedActions"]) == 1
+    assert (
+        result["completedActions"][0]["action"]
+        == "open_cad_document"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sequence_stops_immediately_on_first_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [_open_action_result(), _close_action_result()],
+    )
+
+    pending_open = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Open the gearbox, then close it.",
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=False,
+            errorCode="FILE_NOT_FOUND",
+            errorMessage="The file could not be found.",
+        ),
+    )
+
+    assert result["status"] == "execution_failed"
+    assert result["errorCode"] == "FILE_NOT_FOUND"
+    # No completed actions yet, since the very first one failed.
+    assert "completedActions" not in result
+
+
+@pytest.mark.asyncio
+async def test_sequence_stops_after_partial_success_then_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [_open_action_result(), _close_action_result()],
+    )
+
+    session_id = str(uuid4())
+
+    pending_open = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox, then close it.",
+    )
+
+    pending_close = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending_close["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_close["actionId"],
+            success=False,
+            errorCode="CATIA_BUSY",
+            errorMessage="CATIA could not close the document.",
+        ),
+    )
+
+    assert result["status"] == "execution_failed"
+    assert "Gearbox.CATProduct was opened successfully." in result["message"]
+    assert "CATIA could not close the document." in result["message"]
+    assert len(result["completedActions"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sequence_stops_for_clarification_mid_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [
+            _open_action_result(),
+            ClarificationRequiredResult(
+                status="clarification_required",
+                message="Which document should be closed?",
+                missingField="documentName",
+            ),
+        ],
+    )
+
+    pending_open = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Open the gearbox, then close a document.",
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    assert result["status"] == "clarification_required"
+    assert result["missingField"] == "documentName"
+    assert "Gearbox.CATProduct was opened successfully." in result["message"]
+    assert "Which document should be closed?" in result["message"]
+    assert len(result["completedActions"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sequence_stops_for_non_agentic_mid_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [
+            _open_action_result(),
+            NonAgenticResult(
+                status="non_agentic",
+                message=(
+                    "This request does not require a CATIA action. "
+                    "Route it to the general chat service."
+                ),
+            ),
+        ],
+    )
+
+    pending_open = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Open the gearbox, then tell me a joke.",
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    assert result["status"] == "non_agentic"
+    assert len(result["completedActions"]) == 1
+    assert (
+        result["completedActions"][0]["message"]
+        == "Gearbox.CATProduct was opened successfully."
+    )
+
+
+@pytest.mark.asyncio
+async def test_sequence_is_capped_at_max_actions_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "catia_agent.graph.settings.max_actions_per_run",
+        2,
+    )
+
+    # Use distinct actions on each planning pass so the duplicate-action
+    # guard does not short-circuit the loop before the cap is reached.
+    distinct_open_results = [
+        ActionRequiredResult(
+            status="action_required",
+            action=OpenCadDocumentAction.model_validate(
+                {
+                    "action": "open_cad_document",
+                    "arguments": {
+                        "filePath": f"C:\\TestData\\File{index}.CATProduct",
+                    },
+                }
+            ),
+        )
+        for index in range(5)
+    ]
+
+    _patch_planner(monkeypatch, distinct_open_results)
+
+    session_id = str(uuid4())
+
+    pending = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open several documents.",
+    )
+
+    for _ in range(2):
+        pending = await resume_catia_agent(
+            run_id=pending["runId"],
+            action_result=ActionExecutionResultRequest(
+                actionId=pending["actionId"],
+                success=True,
+                data={"documentName": "Gearbox.CATProduct"},
+            ),
+        )
+
+    assert pending["status"] == "unsupported_request"
+    assert "maximum number of actions" in pending["message"]
+    assert len(pending["completedActions"]) == 2
+

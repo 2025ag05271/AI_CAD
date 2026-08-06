@@ -390,14 +390,17 @@ async def test_plan_catia_action_returns_unsupported_when_no_tool_call(
 
 
 @pytest.mark.asyncio
-async def test_plan_catia_action_rejects_multiple_tool_calls(
+async def test_plan_catia_action_prefers_catia_tool_over_meta_tool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_response = {
         "message": {
             "tool_calls": [
-                _tool_call("open_cad_document", {"filePath": "x"}),
-                _tool_call("get_active_document", {}),
+                _tool_call("route_to_general_chat", {}),
+                _tool_call(
+                    "open_cad_document",
+                    {"filePath": "C:\\TestData\\Gearbox.CATProduct"},
+                ),
             ]
         }
     }
@@ -407,8 +410,37 @@ async def test_plan_catia_action_rejects_multiple_tool_calls(
         AsyncMock(return_value=fake_response),
     )
 
-    with pytest.raises(ValueError, match="exactly one CATIA tool call"):
-        await plan_catia_action(user_command="Do two things.")
+    result = await plan_catia_action(
+        user_command="Open the gearbox.",
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert isinstance(result.action, OpenCadDocumentAction)
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_picks_first_when_only_meta_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = {
+        "message": {
+            "tool_calls": [
+                _tool_call("route_to_general_chat", {}),
+                _tool_call("route_to_general_chat", {}),
+            ]
+        }
+    }
+
+    monkeypatch.setattr(
+        "catia_agent.planner.ollama_client.chat",
+        AsyncMock(return_value=fake_response),
+    )
+
+    result = await plan_catia_action(
+        user_command="Hello.",
+    )
+
+    assert isinstance(result, NonAgenticResult)
 
 
 @pytest.mark.asyncio
@@ -452,3 +484,76 @@ async def test_plan_catia_action_trims_conversation_history(
     assert "first" not in contents
     assert "second" in contents
     assert "third" in contents
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_injects_completed_actions_system_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    async def fake_chat(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.ollama_client.chat",
+        fake_chat,
+    )
+
+    completed = [
+        {
+            "action": "open_cad_document",
+            "arguments": {
+                "filePath": "C:\\TestData\\Gearbox.CATProduct",
+            },
+        }
+    ]
+
+    await plan_catia_action(
+        user_command="Open the gearbox.",
+        completed_actions=completed,
+    )
+
+    system_contents = [
+        m["content"]
+        for m in captured["messages"]
+        if m["role"] == "system"
+    ]
+
+    joined = "\n".join(system_contents)
+
+    assert "already completed" in joined
+    assert "open_cad_document" in joined
+    assert "Gearbox.CATProduct" in joined
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_no_completed_actions_message_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    async def fake_chat(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.ollama_client.chat",
+        fake_chat,
+    )
+
+    await plan_catia_action(
+        user_command="Open the gearbox.",
+        completed_actions=None,
+    )
+
+    system_contents = [
+        m["content"]
+        for m in captured["messages"]
+        if m["role"] == "system"
+    ]
+
+    joined = "\n".join(system_contents)
+
+    assert "already completed" not in joined

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    max_actions_per_run: int = Field(
+        default=20,
+        gt=0,
+    )
+
     log_level: Literal[
         "DEBUG",
         "INFO",

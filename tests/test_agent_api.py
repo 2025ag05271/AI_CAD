@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app import app
+from catia_agent.graph import AgentRunStateConflictError
 
 
 client = TestClient(app)
@@ -101,12 +102,36 @@ def test_invalid_catia_context_is_rejected() -> None:
     assert response.status_code == 422
 
 
-def test_start_agent_run_maps_value_error_to_400() -> None:
+def test_start_agent_run_maps_pending_action_to_409() -> None:
+    with patch(
+        "app.start_catia_agent",
+        new=AsyncMock(
+            side_effect=AgentRunStateConflictError(
+                "This session already has a pending CATIA action."
+            )
+        ),
+    ):
+        response = client.post(
+            "/api/agent/runs",
+            json={
+                "sessionId": "pytest-session-001",
+                "message": "Open the gearbox.",
+            },
+        )
+
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]["errorCode"]
+        == "AGENT_RUN_STATE_CONFLICT"
+    )
+
+
+def test_start_agent_run_maps_generic_value_error_to_400() -> None:
     with patch(
         "app.start_catia_agent",
         new=AsyncMock(
             side_effect=ValueError(
-                "This session already has a pending CATIA action."
+                "Unsupported CATIA document extension."
             )
         ),
     ):
@@ -187,7 +212,7 @@ def test_submit_action_result_state_conflict() -> None:
     with patch(
         "app.resume_catia_agent",
         new=AsyncMock(
-            side_effect=ValueError(
+            side_effect=AgentRunStateConflictError(
                 "This Agent run is not waiting for an action result."
             )
         ),
@@ -204,4 +229,28 @@ def test_submit_action_result_state_conflict() -> None:
     assert (
         response.json()["detail"]["errorCode"]
         == "AGENT_RUN_STATE_CONFLICT"
+    )
+
+
+def test_submit_action_result_resume_failure_is_not_conflict() -> None:
+    with patch(
+        "app.resume_catia_agent",
+        new=AsyncMock(
+            side_effect=ValueError(
+                "Planner rejected the follow-up tool call."
+            )
+        ),
+    ):
+        response = client.post(
+            "/api/agent/runs/run-001/action-results",
+            json={
+                "actionId": "action-001",
+                "success": True,
+            },
+        )
+
+    assert response.status_code == 422
+    assert (
+        response.json()["detail"]["errorCode"]
+        == "AGENT_RUN_RESUME_FAILED"
     )

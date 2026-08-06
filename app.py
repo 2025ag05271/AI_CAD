@@ -3,6 +3,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
 
 from catia_agent.graph import (
+    AgentRunStateConflictError,
+    get_session_id_for_run,
     resume_catia_agent,
     start_catia_agent,
 )
@@ -257,7 +259,17 @@ async def create_agent_run(
                     "message": str(exc),
                 },
             ) from exc
-    
+
+    except AgentRunStateConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "run_state_conflict",
+                    "errorCode": "AGENT_RUN_STATE_CONFLICT",
+                    "message": str(exc),
+                },
+            ) from exc
+
     except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -318,6 +330,13 @@ async def submit_action_result(
     executing the C# CATIA COM action.
     """
 
+    session_id = get_session_id_for_run(run_id)
+    session_token = (
+        session_id_context.set(session_id)
+        if session_id is not None
+        else None
+    )
+
     try:
         logger.info(
             "action_result_received",
@@ -370,7 +389,7 @@ async def submit_action_result(
             },
         ) from exc
 
-    except ValueError as exc:
+    except AgentRunStateConflictError as exc:
         raise HTTPException(
             status_code=409,
             detail={
@@ -379,6 +398,64 @@ async def submit_action_result(
                 "message": str(exc),
             },
         ) from exc
+
+    except McpToolDiscoveryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "mcp_unavailable",
+                "errorCode": "MCP_TOOL_DISCOVERY_FAILED",
+                "message": str(exc),
+            },
+        ) from exc
+
+    except ollama.ResponseError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "model_unavailable",
+                "errorCode": "OLLAMA_REQUEST_FAILED",
+                "message": str(exc),
+            },
+        ) from exc
+
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "model_unavailable",
+                "errorCode": "OLLAMA_CONNECTION_FAILED",
+                "message": (
+                    "The CATIA Agent could not connect "
+                    "to the local Ollama service."
+                ),
+            },
+        ) from exc
+
+    except ValueError as exc:
+        # Planner / policy validation raised while resuming the run.
+        # This is not a state conflict; surface it as a resume failure
+        # so the caller does not treat it as "still pending".
+        logger.exception(
+            "agent_run_resume_failed",
+            extra={
+                "runId": run_id,
+                "actionId": request.actionId,
+            },
+        )
+
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "resume_failed",
+                "errorCode": "AGENT_RUN_RESUME_FAILED",
+                "message": str(exc),
+            },
+        ) from exc
+
+    finally:
+        if session_token is not None:
+            session_id_context.reset(session_token)
         
         
 @app.get(
