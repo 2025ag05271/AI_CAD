@@ -535,7 +535,9 @@ plan_action
   |       v
   |   record_action_result
   |       |
-  |       +--> failed --------------------> END
+  |       +--> failed --------------------------> END
+  |       |
+  |       +--> succeeded (terminal read tool) --> END
   |       |
   |       +--> succeeded, loop back ---> plan_action
   |
@@ -611,7 +613,7 @@ anything) from the original request still remains:
    repeats. If the model calls `complete_request`, the run finalizes as
    `completed` with every step's message joined together.
 
-Five things can end the sequence early:
+Six things can end the sequence early:
 
 - **A failure stops it immediately.** If any action fails,
   `record_action_result` writes the final response directly and the run
@@ -620,6 +622,19 @@ Five things can end the sequence early:
 - **`request_clarification` or `route_to_general_chat` can appear
   mid-sequence.** Both stop the sequence the same way a failure does, but
   with their own status.
+- **Terminal read-only tool short-circuit.** If the action that just
+  succeeded is a member of `TERMINAL_READ_ONLY_TOOLS` in
+  `catia_agent/graph.py` (currently only `get_active_document`),
+  `record_action_result` builds the `completed` response directly and
+  skips the follow-up planning pass. This is logged as
+  `planner_skipped_terminal_read`. Read tools answer a question with a
+  discrete data payload and do not naturally chain into a next action,
+  so a follow-up planner call would only add latency and expose the
+  duplicate-action and silent-model failure modes described below. The
+  documented trade-off is that compound "query-then-act" requests such
+  as "what is the active document, then close it" require a second
+  user turn; the natural phrasing "close the active document" already
+  bypasses the query and executes in one step.
 - **Duplicate-action guard with one-shot corrective retry.** If the
   planner proposes an action whose name AND arguments exactly match one
   already completed in the same run, `plan_action` logs
@@ -935,6 +950,11 @@ Examples of deterministic Python validation:
 - Silent-model recovery: an empty tool-call response on a follow-up
   planning pass (after ≥1 completed action) is treated as an implicit
   `complete_request` (Section 8.2).
+- Terminal read-only tool short-circuit: read tools listed in
+  `TERMINAL_READ_ONLY_TOOLS` in `catia_agent/graph.py` (currently
+  `get_active_document`) finalize the run as `completed` immediately
+  after a successful C# result without another planner call
+  (Section 8.2).
 - `complete_request` from the model is only accepted after at least one
   action has already completed in the same run; otherwise it is rejected
   as a planning error (`MODEL_RETURNED_INVALID_TOOL`).
@@ -990,6 +1010,7 @@ planner_duplicate_action_detected
 planner_duplicate_retry_recovered
 planner_duplicate_retry_failed
 planner_no_decision_treated_as_complete
+planner_skipped_terminal_read
 action_result_received
 agent_run_planned
 agent_run_resumed
@@ -1081,6 +1102,17 @@ In `catia_agent/planner.py`:
   of `plan_catia_action` so it produces `ActionRequiredResult`.
 
 MCP discovery does not automatically approve a tool for execution.
+
+If the new tool is a **pure read** — it answers a question with a
+discrete data payload and does not naturally chain into a follow-up
+CATIA action — also add its name to `TERMINAL_READ_ONLY_TOOLS` in
+`catia_agent/graph.py`. Read tools currently in that set:
+`get_active_document`. Candidates as they land: `list_open_documents`,
+`get_document_info`, `get_component_position`, `get_component_cog`.
+Write or mutating tools (`open_cad_document`, `close_cad_document`,
+`create_cad_document`, and any future modifying operation) must **not**
+be added to that set — they legitimately chain in compound messages and
+need the follow-up planner call to keep working.
 
 ### Step 4: Add deterministic policy checks
 

@@ -73,6 +73,20 @@ class CatiaAgentState(TypedDict, total=False):
 
 
 # -------------------------------------------------------------------------
+# Tool classification
+# -------------------------------------------------------------------------
+
+# CATIA tools whose success terminates the run without another planner call.
+# These are pure reads that answer a question and never chain into a
+# follow-up action.
+TERMINAL_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_active_document",
+    }
+)
+
+
+# -------------------------------------------------------------------------
 # Process-local run lookup
 # -------------------------------------------------------------------------
 
@@ -583,6 +597,46 @@ def record_action_result_node(
             "content": success_message,
         }
     )
+
+    if action_name in TERMINAL_READ_ONLY_TOOLS:
+        logger.info(
+            "planner_skipped_terminal_read",
+            extra={
+                "runId": state["run_id"],
+                "selectedTool": action_name,
+            },
+        )
+
+        final_message = _join_completed_messages(
+            completed_actions
+        )
+
+        final_response = {
+            "status": "completed",
+            "sessionId": state["session_id"],
+            "runId": state["run_id"],
+            "actionId": expected_action_id,
+            "message": final_message,
+            "data": result.data,
+            "completedActions": (
+                _serialize_completed_actions(
+                    completed_actions
+                )
+            ),
+        }
+
+        return {
+            "completed_actions": completed_actions,
+            "sequence_progress": [],
+            "planner_result": None,
+            "pending_action": None,
+            "action_result": None,
+            "final_response": final_response,
+            "messages": _record_conversation_turn(
+                state,
+                final_message,
+            ),
+        }
 
     return {
         "completed_actions": completed_actions,
