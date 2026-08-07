@@ -1,46 +1,424 @@
-from pathlib import Path
-from typing import Any
+from __future__ import annotations
 
+import asyncio
 import json
+import time
+from pathlib import PureWindowsPath
+from typing import Any, Protocol
 
 import ollama
+from pydantic import ValidationError
 
+from catia_agent.config import settings
+from catia_agent.logging_config import get_logger
+from catia_agent.mcp_tools import (
+    load_ollama_tools_from_mcp,
+)
 from catia_agent.models import (
     ActionRequiredResult,
     CatiaContext,
     ClarificationRequiredResult,
     CloseCadDocumentAction,
+    CompleteRequestAction,
     CreateCadDocumentAction,
     GetActiveDocumentAction,
+    InvalidRequestResult,
     NonAgenticResult,
     OpenCadDocumentAction,
     PlannerResult,
+    PlanningErrorResult,
+    ReportUnsupportedCatiaAction,
     RequestClarificationAction,
+    RequestCompletedResult,
     RouteToGeneralChatAction,
     UnsupportedRequestResult,
 )
-from catia_agent.mcp_tools import (
-    load_ollama_tools_from_mcp,
-)
-
-
-from catia_agent.config import settings
-from catia_agent.logging_config import get_logger
 
 
 logger = get_logger(__name__)
 
 MODEL_NAME = settings.ollama_model
 
-ollama_client = ollama.AsyncClient(
-    host=settings.ollama_base_url
+
+# -------------------------------------------------------------------------
+# Exceptions
+# -------------------------------------------------------------------------
+
+class ModelProviderError(RuntimeError):
+    """
+    Base exception for model-provider failures.
+    """
+
+
+class ModelProviderTimeoutError(
+    ModelProviderError
+):
+    """
+    Raised when the configured model does not respond in time.
+    """
+
+
+class ModelResponseFormatError(
+    ModelProviderError
+):
+    """
+    Raised when the model provider returns an unreadable response.
+    """
+
+
+# -------------------------------------------------------------------------
+# Model-provider abstraction
+# -------------------------------------------------------------------------
+
+class ToolCallingModelClient(Protocol):
+    """
+    Provider-neutral interface used by the CATIA planner.
+
+    A future Azure implementation can implement this protocol without
+    changing the graph, MCP catalog, or planner policy.
+    """
+
+    async def select_tool(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> Any:
+        ...
+
+
+class OllamaToolCallingModelClient:
+    """
+    Current local Ollama implementation.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model_name: str,
+        timeout_seconds: float,
+        temperature: float,
+    ) -> None:
+        self._model_name = model_name
+        self._timeout_seconds = timeout_seconds
+        self._temperature = temperature
+
+        self._client = ollama.AsyncClient(
+            host=base_url
+        )
+
+    async def select_tool(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> Any:
+        try:
+            async with asyncio.timeout(
+                self._timeout_seconds
+            ):
+                return await self._client.chat(
+                    model=self._model_name,
+                    messages=messages,
+                    tools=tools,
+                    think=False,
+                    options={
+                        "temperature": (
+                            self._temperature
+                        ),
+                    },
+                )
+
+        except TimeoutError as exc:
+            raise ModelProviderTimeoutError(
+                "The model did not respond within "
+                f"{self._timeout_seconds} seconds."
+            ) from exc
+
+
+model_client: ToolCallingModelClient = (
+    OllamaToolCallingModelClient(
+        base_url=settings.ollama_base_url,
+        model_name=settings.ollama_model,
+        timeout_seconds=(
+            settings.ollama_request_timeout_seconds
+        ),
+        temperature=settings.model_temperature,
+    )
 )
 
+
+# -------------------------------------------------------------------------
+# Orchestrator-only tools
+#
+# These are planning control signals. They are not CATIA executor tools
+# and are therefore not published by the CATIA MCP server.
+# -------------------------------------------------------------------------
+
+ORCHESTRATOR_TOOLS: list[
+    dict[str, Any]
+] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "request_clarification",
+            "description": (
+                "Ask the user for information required before a "
+                "supported CATIA action can be prepared. Use this "
+                "only when the intended CATIA operation is supported "
+                "but a required argument or reference is missing or "
+                "ambiguous."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "A concise question asking for the "
+                            "missing information."
+                        ),
+                    },
+                    "missingField": {
+                        "type": "string",
+                        "description": (
+                            "Stable name of the missing or "
+                            "ambiguous field."
+                        ),
+                    },
+                },
+                "required": [
+                    "question",
+                    "missingField",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "route_to_general_chat",
+            "description": (
+                "Route a message that does not require executing a "
+                "CATIA action to the general chat service. Use this "
+                "for greetings, explanations, informational "
+                "questions, capability questions, and requests "
+                "unrelated to CATIA execution. Do not answer the "
+                "message yourself."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": (
+                "report_unsupported_catia_action"
+            ),
+            "description": (
+                "Report that the user requested a CATIA operation "
+                "but no available approved CATIA tool can perform "
+                "it. Use this only for execution requests, not for "
+                "informational questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "requestedCapability": {
+                        "type": "string",
+                        "description": (
+                            "Short description of the CATIA "
+                            "capability requested by the user."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "enum": [
+                            "tool_not_available",
+                            "operation_not_allowed",
+                            "executor_not_available",
+                        ],
+                    },
+                },
+                "required": [
+                    "requestedCapability",
+                    "reason",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+    "type": "function",
+    "function": {
+        "name": "complete_request",
+        "description": (
+            "Signal that all CATIA actions requested in the "
+            "original user message have completed successfully "
+            "and no further action remains. Use this only during "
+            "follow-up planning after one or more actions have "
+            "already completed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+            },
+        },
+    },
+]
+
+
+ORCHESTRATOR_TOOL_NAMES = frozenset(
+    {
+        "request_clarification",
+        "route_to_general_chat",
+        "report_unsupported_catia_action",
+        "complete_request",
+    }
+)
+
+APPROVED_CATIA_TOOL_NAMES = frozenset(
+    {
+        "open_cad_document",
+        "get_active_document",
+        "close_cad_document",
+        "create_cad_document",
+    }
+)
+
+
+# -------------------------------------------------------------------------
+# Generic response helpers
+# -------------------------------------------------------------------------
+
+def _get_value(
+    source: Any,
+    key: str,
+    default: Any = None,
+) -> Any:
+    if isinstance(source, dict):
+        return source.get(
+            key,
+            default,
+        )
+
+    return getattr(
+        source,
+        key,
+        default,
+    )
+
+
+def _extract_tool_calls(
+    response: Any,
+) -> list:
+    
+    message = _get_value(
+        response,
+        "message",
+    )
+
+    if message is None:
+        raise ModelResponseFormatError(
+            "The model response did not contain a message."
+        )
+
+    tool_calls = _get_value(
+        message,
+        "tool_calls",
+        [],
+    )
+
+    if tool_calls is None:
+        return []
+
+    if not isinstance(tool_calls, list):
+        try:
+            return list(tool_calls)
+        except TypeError as exc:
+            raise ModelResponseFormatError(
+                "The model returned an invalid tool-call list."
+            ) from exc
+
+    return tool_calls
+
+
+def _extract_tool_call(
+    tool_call: Any,
+) -> tuple[str, dict[str, Any]]:
+    function = _get_value(
+        tool_call,
+        "function",
+    )
+
+    if function is None:
+        raise ModelResponseFormatError(
+            "The model returned a tool call without a function."
+        )
+
+    tool_name = _get_value(
+        function,
+        "name",
+    )
+
+    if not isinstance(tool_name, str):
+        raise ModelResponseFormatError(
+            "The model returned a tool call without a valid name."
+        )
+
+    tool_name = tool_name.strip()
+
+    if not tool_name:
+        raise ModelResponseFormatError(
+            "The model returned an empty tool name."
+        )
+
+    arguments = _get_value(
+        function,
+        "arguments",
+        {},
+    )
+
+    if arguments is None:
+        arguments = {}
+
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            raise ModelResponseFormatError(
+                f"Tool '{tool_name}' returned invalid JSON "
+                "arguments."
+            ) from exc
+
+    if not isinstance(arguments, dict):
+        raise ModelResponseFormatError(
+            f"Tool '{tool_name}' returned arguments that are "
+            "not a JSON object."
+        )
+
+    return tool_name, arguments
+
+
+# -------------------------------------------------------------------------
+# Deterministic action validation
+# -------------------------------------------------------------------------
 
 def validate_open_cad_document(
     action: OpenCadDocumentAction,
 ) -> None:
-    file_path = Path(action.arguments.filePath)
+    path = PureWindowsPath(
+        action.arguments.filePath
+    )
 
     allowed_extensions = {
         ".catpart",
@@ -48,85 +426,128 @@ def validate_open_cad_document(
         ".catdrawing",
     }
 
-    if not file_path.is_absolute():
+    if not path.is_absolute():
         raise ValueError(
-            "The CATIA document path must be absolute."
+            "The CATIA document path must be an absolute "
+            "Windows path."
         )
 
-    if file_path.suffix.lower() not in allowed_extensions:
+    if path.suffix.lower() not in allowed_extensions:
+        displayed_extension = (
+            path.suffix
+            if path.suffix
+            else "[missing extension]"
+        )
+
         raise ValueError(
-            f"Unsupported CATIA document extension: "
-            f"{file_path.suffix or '[missing extension]'}"
+            "Unsupported CATIA document extension: "
+            f"{displayed_extension}"
         )
 
 
 def create_typed_action(
     tool_name: str,
     tool_arguments: dict[str, Any],
+) -> (
+    OpenCadDocumentAction
+    | GetActiveDocumentAction
+    | CloseCadDocumentAction
+    | CreateCadDocumentAction
+    | RequestClarificationAction
+    | RouteToGeneralChatAction
+    | ReportUnsupportedCatiaAction
+    | CompleteRequestAction
 ):
-    
     """
-    Convert a Qwen-selected MCP tool call into the matching
-    typed application action.
+    Convert a model-selected tool call into an explicitly approved,
+    typed action.
 
-    The explicit mapping prevents arbitrary tool names from
-    being passed to the future WPF executor.
+    MCP discovery does not automatically authorize execution.
     """
-    
+
     raw_action = {
         "action": tool_name,
         "arguments": tool_arguments,
     }
 
     if tool_name == "open_cad_document":
-        action = OpenCadDocumentAction.model_validate(
-            raw_action
+        action = (
+            OpenCadDocumentAction.model_validate(
+                raw_action
+            )
         )
 
         validate_open_cad_document(action)
         return action
 
     if tool_name == "get_active_document":
-        return GetActiveDocumentAction.model_validate(
-            raw_action
+        return (
+            GetActiveDocumentAction.model_validate(
+                raw_action
+            )
         )
 
     if tool_name == "close_cad_document":
-        action = CloseCadDocumentAction.model_validate(
-            raw_action
+        return (
+            CloseCadDocumentAction.model_validate(
+                raw_action
+            )
         )
 
-        validate_close_cad_document(action)
-        return action
-
     if tool_name == "create_cad_document":
-        return CreateCadDocumentAction.model_validate(
-            raw_action
+        return (
+            CreateCadDocumentAction.model_validate(
+                raw_action
+            )
         )
 
     if tool_name == "request_clarification":
-        return RequestClarificationAction.model_validate(
-            raw_action
+        return (
+            RequestClarificationAction.model_validate(
+                raw_action
+            )
         )
 
     if tool_name == "route_to_general_chat":
-        return RouteToGeneralChatAction.model_validate(
-            raw_action
+        return (
+            RouteToGeneralChatAction.model_validate(
+                raw_action
+            )
         )
 
+    if (
+        tool_name
+        == "report_unsupported_catia_action"
+    ):
+        return (
+            ReportUnsupportedCatiaAction.model_validate(
+                raw_action
+            )
+        )
+
+    if tool_name == "complete_request":
+        return CompleteRequestAction.model_validate(
+            raw_action
+        )
+        
     raise ValueError(
-        "The MCP server exposed a tool for which the Agent "
-        f"has no approved typed model: {tool_name}"
+        "The model selected an unapproved tool: "
+        f"{tool_name}"
     )
+
+
+# -------------------------------------------------------------------------
+# Prompt context
+# -------------------------------------------------------------------------
 
 def build_catia_context_message(
     catia_context: CatiaContext | None,
 ) -> str:
     if catia_context is None:
         return (
-            "CATIA runtime context was not supplied. "
-            "Use the available tools whenever current CATIA "
-            "state is required."
+            "CATIA runtime context was not supplied. Treat current "
+            "CATIA state as unknown. Use an available CATIA tool "
+            "when authoritative current state is required."
         )
 
     if not catia_context.isRunning:
@@ -134,143 +555,269 @@ def build_catia_context_message(
             "CATIA runtime context:\n"
             "- CATIA is not currently running.\n"
             "- There is no active document.\n"
-            "- There are no open documents."
+            "- There are no open documents.\n"
+            "- There are no selected objects."
         )
 
-    if catia_context.activeDocument is None:
-        active_document = "None"
-    else:
-        active_document = (
-            catia_context.activeDocument.name
-        )
+    active_document = (
+        catia_context.activeDocument.name
+        if catia_context.activeDocument
+        else "None"
+    )
 
-    if catia_context.openDocuments:
-        open_documents = ", ".join(
+    open_documents = (
+        ", ".join(
             document.name
-            for document in catia_context.openDocuments
+            for document
+            in catia_context.openDocuments
         )
-    else:
-        open_documents = "None"
+        if catia_context.openDocuments
+        else "None"
+    )
 
-    if catia_context.selectedObjects:
-        selected_objects = ", ".join(
+    selected_objects = (
+        ", ".join(
             selected_object.name
             for selected_object
             in catia_context.selectedObjects
         )
-    else:
-        selected_objects = "None"
+        if catia_context.selectedObjects
+        else "None"
+    )
+
+    context_version = (
+        str(catia_context.contextVersion)
+        if catia_context.contextVersion
+        is not None
+        else "Not supplied"
+    )
 
     return (
-        "CATIA runtime context:\n"
+        "CATIA runtime context snapshot:\n"
         f"- CATIA is running: {catia_context.isRunning}\n"
         f"- Active document: {active_document}\n"
         f"- Open documents: {open_documents}\n"
-        f"- Selected objects: {selected_objects}\n\n"
-        "This context may be a snapshot. Use an available "
-        "CATIA tool when the request requires authoritative "
-        "current information."
+        f"- Selected objects: {selected_objects}\n"
+        f"- Context version: {context_version}\n\n"
+        "This context is a snapshot and may be stale. Use a CATIA "
+        "tool whenever the request requires authoritative current "
+        "state."
     )
 
 
-def validate_close_cad_document(
-    action: CloseCadDocumentAction,
-) -> None:
-    arguments = action.arguments
-
-    if arguments.targetMode == "named":
-        if (
-            arguments.documentName is None
-            or not arguments.documentName.strip()
-        ):
-            raise ValueError(
-                "documentName is required when closing "
-                "a named CATIA document."
-            )
-
-        arguments.documentName = (
-            arguments.documentName.strip()
-        )
-
-    elif arguments.documentName is not None:
-        arguments.documentName = None
-
-
-# Meta-tools are handled entirely inside the Agent and are secondary to
-# any real CATIA action when Qwen emits parallel tool calls.
-_META_TOOL_NAMES = frozenset({
-    "route_to_general_chat",
-    "request_clarification",
-})
-
-
-def _choose_primary_tool_call(
-    tool_calls: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Pick one tool call, preferring a real CATIA action over meta-tools."""
-
-    for call in tool_calls:
-        name = call.get("function", {}).get("name")
-
-        if name and name not in _META_TOOL_NAMES:
-            return call
-
-    return tool_calls[0]
-
-
 def _build_completed_actions_message(
-    completed_actions: list[dict[str, Any]] | None,
+    user_command: str,
+    completed_actions: (
+        list[dict[str, Any]] | None
+    ),
 ) -> str | None:
-    """Format an explicit anti-repetition note for the planner."""
-
     if not completed_actions:
         return None
 
     lines = [
-        "The following CATIA actions have already completed successfully "
-        "for the current user request. Do NOT call any of them again with "
-        "the same arguments. If the user's original request is now fully "
-        "satisfied, do not call a tool at all.",
+        "Goal-delta analysis for this planning step.",
         "",
+        f'Original user request: "{user_command}"',
+        "",
+        "Actions already completed in this run:",
     ]
 
     for entry in completed_actions:
-        name = entry.get("action", "unknown")
-        arguments = entry.get("arguments") or {}
+        action_name = entry.get(
+            "action",
+            "unknown",
+        )
 
-        lines.append(f"- {name} {json.dumps(arguments, sort_keys=True)}")
+        arguments = entry.get(
+            "arguments",
+            {},
+        )
+
+        lines.append(
+            f"- {action_name} "
+            f"{json.dumps(arguments, sort_keys=True)}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "Compare the original user request against the actions "
+            "already completed and decide what is left.",
+            "",
+            "If one or more CATIA operations from the original "
+            "request are still not done, select the SINGLE NEXT "
+            "remaining CATIA action.",
+            "",
+            "If every CATIA operation in the original request is "
+            "done, call complete_request.",
+            "",
+            "Do not repeat any action listed above with the same "
+            "name and the same arguments. Do not invent additional "
+            "work that was not in the original request.",
+        ]
+    )
 
     return "\n".join(lines)
 
 
+def _build_system_prompt() -> str:
+    return (
+        "You are the routing and tool-selection orchestrator for a "
+        "CATIA engineering assistant.\n\n"
+        "You must select exactly one available tool for every user "
+        "message. Never answer the user directly and never return "
+        "free-form text instead of a tool call.\n\n"
+        "Select a CATIA MCP tool only when the user is asking to "
+        "perform an operation supported by that tool.\n\n"
+        "Select route_to_general_chat for greetings, explanations, "
+        "informational questions, capability questions, hypothetical "
+        "questions, and requests that do not require executing a "
+        "CATIA operation.\n\n"
+        "Select request_clarification when the intended CATIA action "
+        "is supported but required information is missing or "
+        "ambiguous.\n\n"
+        "Select report_unsupported_catia_action when the user clearly "
+        "requests execution of a CATIA operation but no approved "
+        "CATIA tool can perform it.\n\n"
+        "Distinguish questions from commands. For example, 'How do I "
+        "close a document?' is informational and must be routed to "
+        "general chat, while 'Close the active document' is an "
+        "execution request.\n\n"
+        "Do not invent document names, paths, selections, or other "
+        "arguments. Resolve pronouns and ordinal references only from "
+        "trusted CATIA context and conversation history.\n\n"
+        "For compound requests, select only the next remaining CATIA "
+        "action. Actions already completed for the current request "
+        "must not be repeated.\n\n"
+        "Select complete_request only during follow-up planning when "
+        "one or more CATIA actions have completed and the original "
+        "user request is now fully satisfied.\n\n"
+    )
+
+
+# -------------------------------------------------------------------------
+# Planner
+# -------------------------------------------------------------------------
+
 async def plan_catia_action(
     user_command: str,
     catia_context: CatiaContext | None = None,
-    conversation_history: list[dict[str, str]] | None = None,
-    completed_actions: list[dict[str, Any]] | None = None,
+    conversation_history: (
+        list[dict[str, str]] | None
+    ) = None,
+    completed_actions: (
+        list[dict[str, Any]] | None
+    ) = None,
+    retry_hint: str | None = None,
 ) -> PlannerResult:
-    
-    ollama_tools = await load_ollama_tools_from_mcp()
-    
-    context_message = build_catia_context_message(
-        catia_context
+    normalized_command = user_command.strip()
+
+    if not normalized_command:
+        return InvalidRequestResult(
+            status="invalid_request",
+            message="The user message must not be empty.",
+        )
+
+    mcp_tools = await load_ollama_tools_from_mcp()
+
+    available_tool_names = {
+        tool["function"]["name"]
+        for tool in mcp_tools
+    }
+
+    unexpected_tools = (
+        available_tool_names
+        - APPROVED_CATIA_TOOL_NAMES
     )
 
+    if unexpected_tools:
+        raise ValueError(
+            "The MCP server exposed CATIA tools that are not "
+            "integrated by the Agent: "
+            + ", ".join(
+                sorted(unexpected_tools)
+            )
+        )
+
+    missing_tools = (
+        APPROVED_CATIA_TOOL_NAMES
+        - available_tool_names
+    )
+
+    if missing_tools:
+        logger.warning(
+            "mcp_approved_tools_missing",
+            extra={
+                "missingToolNames": sorted(
+                    missing_tools
+                ),
+            },
+        )
+
+    available_tools = [
+        *mcp_tools,
+        *ORCHESTRATOR_TOOLS,
+    ]
+
     history = conversation_history or []
+
     trimmed_history = history[
         -settings.max_conversation_history_messages:
     ]
 
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": _build_system_prompt(),
+        },
+        {
+            "role": "system",
+            "content": build_catia_context_message(
+                catia_context
+            ),
+        },
+    ]
+
     completed_actions_message = (
-        _build_completed_actions_message(completed_actions)
+        _build_completed_actions_message(
+            normalized_command,
+            completed_actions,
+        )
     )
-    
+
+    if completed_actions_message:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    completed_actions_message
+                ),
+            }
+        )
+
+    messages.extend(trimmed_history)
+
+    if retry_hint:
+        messages.append(
+            {
+                "role": "system",
+                "content": retry_hint,
+            }
+        )
+
+    messages.append(
+        {
+            "role": "user",
+            "content": normalized_command,
+        }
+    )
+
     logger.info(
-        "qwen_tool_selection_started",
+        "model_tool_selection_started",
         extra={
             "model": MODEL_NAME,
             "availableToolCount": len(
-                ollama_tools
+                available_tools
             ),
             "historyMessageCount": len(
                 trimmed_history
@@ -281,139 +828,160 @@ async def plan_catia_action(
         },
     )
 
-    messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": (
-                "You are the orchestrator for a CATIA engineering "
-                "assistant. For every user message, first decide "
-                "whether it requires a CATIA action or is a general "
-                "conversational query, then respond accordingly. "
+    started_at = time.perf_counter()
 
-                "Call an available tool only when the user's request "
-                "requires performing a CATIA action that a tool "
-                "supports. Each tool's own description explains "
-                "exactly when and how to use it; follow those "
-                "descriptions precisely rather than guessing. The "
-                "available tools were discovered from the approved "
-                "CATIA MCP server. "
-
-                "If the user's message is a greeting, general "
-                "question, request for explanation, or anything else "
-                "that does not require a CATIA action, call "
-                "route_to_general_chat. Do not answer the question "
-                "yourself and do not generate a conversational reply. "
-
-                "If the request clearly needs a CATIA action but no "
-                "available tool supports it, do not call a tool and "
-                "do not call route_to_general_chat either. "
-
-                "When a tool argument identifies a document and the "
-                "user refers to it using an ordinal (the first one, "
-                "the second one) or a pronoun (it, that document, "
-                "that one), resolve the reference using the "
-                "conversation history below instead of asking again. "
-
-                "The user's message may request more than one CATIA "
-                "action. If the conversation history immediately "
-                "below already shows one or more actions completed "
-                "for this exact request, determine whether anything "
-                "from the original request still remains, and select "
-                "the next tool for only the remaining part. If "
-                "everything requested has already been completed, do "
-                "not call a tool. "
-
-                "Do not invent document names, file paths, or other "
-                "arguments that were not stated or resolved from "
-                "context. Select exactly one available tool when "
-                "possible."
-            ),
-        },
-        {
-            "role": "system",
-            "content": context_message,
-        },
-    ]
-
-    if completed_actions_message is not None:
-        messages.append(
-            {
-                "role": "system",
-                "content": completed_actions_message,
-            }
-        )
-
-    messages.extend(trimmed_history)
-    messages.append(
-        {
-            "role": "user",
-            "content": user_command,
-        }
-    )
-
-    response = await ollama_client.chat(
-        model=MODEL_NAME,
+    response = await model_client.select_tool(
         messages=messages,
-        tools=ollama_tools,
-        think=False,
-        options={
-            "temperature": 0,
-        },
+        tools=available_tools,
     )
 
-    message = response["message"]
-    tool_calls = message.get("tool_calls") or []
+    duration_ms = round(
+        (
+            time.perf_counter()
+            - started_at
+        )
+        * 1000,
+        2,
+    )
+
+    tool_calls = _extract_tool_calls(response)
 
     if not tool_calls:
-        logger.info(
-            "qwen_no_matching_tool",
+        if completed_actions:
+            logger.info(
+                "planner_no_decision_treated_as_complete",
+                extra={
+                    "model": MODEL_NAME,
+                    "durationMs": duration_ms,
+                    "completedActionCount": len(
+                        completed_actions
+                    ),
+                },
+            )
+
+            return RequestCompletedResult(
+                status="request_completed",
+            )
+
+        logger.error(
+            "model_returned_no_decision",
             extra={
                 "model": MODEL_NAME,
+                "durationMs": duration_ms,
             },
         )
 
-        return UnsupportedRequestResult(
-            status="unsupported_request",
+        return PlanningErrorResult(
+            status="planning_error",
+            errorCode=(
+                "MODEL_RETURNED_NO_DECISION"
+            ),
             message=(
-                "No available CATIA tool supports this request."
+                "The Agent could not produce a structured "
+                "routing decision."
             ),
         )
 
-    if len(tool_calls) > 1:
-        # Qwen 3B occasionally emits parallel tool calls on the
-        # follow-up planning pass; keep the run alive by choosing one
-        # rather than failing the whole request.
-        logger.warning(
-            "qwen_multiple_tool_calls",
+    if len(tool_calls) != 1:
+        logger.error(
+            "model_returned_multiple_decisions",
             extra={
                 "model": MODEL_NAME,
-                "toolCallCount": len(tool_calls),
-                "toolNames": [
-                    call.get("function", {}).get("name")
-                    for call in tool_calls
-                ],
+                "toolCallCount": len(
+                    tool_calls
+                ),
+                "durationMs": duration_ms,
             },
         )
 
-    chosen_call = _choose_primary_tool_call(tool_calls)
+        return PlanningErrorResult(
+            status="planning_error",
+            errorCode=(
+                "MODEL_RETURNED_MULTIPLE_DECISIONS"
+            ),
+            message=(
+                "The Agent returned multiple routing decisions "
+                "for one planning step."
+            ),
+        )
 
-    function = chosen_call["function"]
+    try:
+        (
+            tool_name,
+            tool_arguments,
+        ) = _extract_tool_call(
+            tool_calls[0]
+        )
 
-    tool_name = function["name"]
-    tool_arguments = function.get("arguments") or {}
+    except ModelResponseFormatError:
+        logger.exception(
+            "model_tool_call_format_invalid",
+            extra={
+                "model": MODEL_NAME,
+                "durationMs": duration_ms,
+            },
+        )
+
+        return PlanningErrorResult(
+            status="planning_error",
+            errorCode=(
+                "MODEL_RETURNED_INVALID_ARGUMENTS"
+            ),
+            message=(
+                "The Agent returned an invalid structured "
+                "tool call."
+            ),
+        )
+
+    if (
+        tool_name not in available_tool_names
+        and tool_name
+        not in ORCHESTRATOR_TOOL_NAMES
+    ):
+        logger.error(
+            "model_selected_unknown_tool",
+            extra={
+                "model": MODEL_NAME,
+                "selectedTool": tool_name,
+                "durationMs": duration_ms,
+            },
+        )
+
+        return PlanningErrorResult(
+            status="planning_error",
+            errorCode=(
+                "MODEL_RETURNED_INVALID_TOOL"
+            ),
+            message=(
+                "The Agent selected a tool that is not "
+                "available."
+            ),
+        )
 
     logger.info(
-        "qwen_tool_selected",
+        "model_tool_selected",
         extra={
             "model": MODEL_NAME,
             "selectedTool": tool_name,
+            "durationMs": duration_ms,
         },
     )
-    
-    typed_action = create_typed_action(
-        tool_name=tool_name,
-        tool_arguments=tool_arguments,
-    )
+
+    try:
+        typed_action = create_typed_action(
+            tool_name=tool_name,
+            tool_arguments=tool_arguments,
+        )
+
+    except ValidationError:
+        logger.exception(
+            "model_tool_arguments_invalid",
+            extra={
+                "model": MODEL_NAME,
+                "selectedTool": tool_name,
+            },
+        )
+        raise
 
     if isinstance(
         typed_action,
@@ -421,7 +989,9 @@ async def plan_catia_action(
     ):
         return ClarificationRequiredResult(
             status="clarification_required",
-            message=typed_action.arguments.question,
+            message=(
+                typed_action.arguments.question
+            ),
             missingField=(
                 typed_action.arguments.missingField
             ),
@@ -431,22 +1001,53 @@ async def plan_catia_action(
         typed_action,
         RouteToGeneralChatAction,
     ):
-        logger.info(
-            "orchestrator_routed_to_general_chat",
-            extra={
-                "model": MODEL_NAME,
-            },
-        )
-
         return NonAgenticResult(
             status="non_agentic",
             message=(
-                "This request does not require a CATIA action. "
-                "Route it to the general chat service."
+                "This request does not require a CATIA "
+                "execution action."
             ),
+            routeTarget="general_chat",
+            routeReason="general_conversation",
         )
 
-    return ActionRequiredResult(
-        status="action_required",
-        action=typed_action,
+    if isinstance(
+    typed_action,
+    CompleteRequestAction,
+    ):
+        if not completed_actions:
+            return PlanningErrorResult(
+                status="planning_error",
+                errorCode="MODEL_RETURNED_INVALID_TOOL",
+                message=(
+                    "The Agent attempted to complete a request "
+                    "before any CATIA action had executed."
+                ),
+            )
+
+        return RequestCompletedResult(
+            status="request_completed",
+        )
+
+    if isinstance(
+        typed_action,
+        (
+            OpenCadDocumentAction,
+            GetActiveDocumentAction,
+            CloseCadDocumentAction,
+            CreateCadDocumentAction,
+        ),
+    ):
+        return ActionRequiredResult(
+            status="action_required",
+            action=typed_action,
+        )
+
+    return PlanningErrorResult(
+        status="planning_error",
+        errorCode="MODEL_RETURNED_INVALID_TOOL",
+        message=(
+            "The Agent produced an action type that could not "
+            "be routed."
+        ),
     )

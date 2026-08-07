@@ -35,9 +35,11 @@ def _patch_planner(monkeypatch: pytest.MonkeyPatch, result):
         catia_context=None,
         conversation_history=None,
         completed_actions=None,
+        retry_hint=None,
     ):
         fake_plan_catia_action.last_history = conversation_history
         fake_plan_catia_action.last_completed_actions = completed_actions
+        fake_plan_catia_action.last_retry_hint = retry_hint
         index = min(
             fake_plan_catia_action.call_count,
             len(results) - 1,

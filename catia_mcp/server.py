@@ -1,26 +1,145 @@
-from pathlib import Path
+from __future__ import annotations
+
+from pathlib import PureWindowsPath
 from typing import Any, Literal
 
 from fastmcp import FastMCP
 
 
+# -------------------------------------------------------------------------
+# MCP server
+# -------------------------------------------------------------------------
+
 mcp = FastMCP(
     name="CATIA Tools",
     instructions=(
-        "This server exposes approved CATIA actions. "
-        "The tools prepare typed action requests for an external "
-        "WPF C# executor. The MCP server does not access CATIA "
-        "or execute COM operations directly."
+        "This server exposes approved CATIA actions for discovery by "
+        "the CATIA Agent. Tools prepare typed action requests for an "
+        "external WPF C# executor. This MCP server does not access "
+        "CATIA, execute COM operations, or modify CAD documents."
     ),
 )
 
 
-ALLOWED_DOCUMENT_EXTENSIONS = {
-    ".catpart",
-    ".catproduct",
-    ".catdrawing",
-}
+# -------------------------------------------------------------------------
+# Constants
+# -------------------------------------------------------------------------
 
+ALLOWED_DOCUMENT_EXTENSIONS = frozenset(
+    {
+        ".catpart",
+        ".catproduct",
+        ".catdrawing",
+    }
+)
+
+DocumentType = Literal[
+    "CATProduct",
+    "CATPart",
+    "CATDrawing",
+]
+
+CloseTargetMode = Literal[
+    "active",
+    "named",
+    "all",
+]
+
+
+# -------------------------------------------------------------------------
+# Shared validation
+# -------------------------------------------------------------------------
+
+def validate_windows_document_path(
+    file_path: str,
+) -> str:
+    """
+    Validate and normalize an absolute Windows CATIA document path.
+
+    File existence and approved-directory checks remain the
+    responsibility of the external C# executor because it owns access
+    to the Windows file system and CATIA.
+    """
+
+    normalized_path = file_path.strip()
+
+    if not normalized_path:
+        raise ValueError(
+            "The CATIA document path must not be empty."
+        )
+
+    path = PureWindowsPath(normalized_path)
+
+    if not path.is_absolute():
+        raise ValueError(
+            "The CATIA document path must be an absolute "
+            "Windows path."
+        )
+
+    extension = path.suffix.lower()
+
+    if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+        displayed_extension = (
+            path.suffix
+            if path.suffix
+            else "[missing extension]"
+        )
+
+        raise ValueError(
+            "Unsupported CATIA document extension: "
+            f"{displayed_extension}"
+        )
+
+    return str(path)
+
+
+def normalize_document_name(
+    document_name: str,
+) -> str:
+    """
+    Validate a document name supplied to a named-document operation.
+    """
+
+    normalized_name = document_name.strip()
+
+    if not normalized_name:
+        raise ValueError(
+            "The CATIA document name must not be empty."
+        )
+
+    if len(normalized_name) > 260:
+        raise ValueError(
+            "The CATIA document name is too long."
+        )
+
+    return normalized_name
+
+
+def create_executor_action(
+    *,
+    action: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Create the standard action-preparation envelope returned by MCP
+    tools.
+
+    The result describes a proposed external operation. It does not
+    indicate that CATIA execution has occurred.
+    """
+
+    return {
+        "status": "action_prepared",
+        "action": action,
+        "arguments": arguments,
+        "executor": "wpf_csharp",
+        "executed": False,
+    }
+
+
+# -------------------------------------------------------------------------
+# CATIA document tools
+# -------------------------------------------------------------------------
 
 @mcp.tool
 def open_cad_document(
@@ -29,213 +148,157 @@ def open_cad_document(
     """
     Prepare an action to open an existing CATIA document.
 
-    Use this tool when the user explicitly requests opening a
-    CATPart, CATProduct, or CATDrawing document.
+    Use this tool only when the user asks to open a CATPart,
+    CATProduct, or CATDrawing document.
 
-    The filePath must be an absolute Windows file path.
-    This tool does not open CATIA itself. It returns a validated
-    action for execution by the external WPF C# CATIA executor.
+    The file path must be an absolute Windows path. Do not invent or
+    infer a path that was not supplied by the user or resolved from
+    trusted conversation context.
+
+    This tool prepares an action for the external WPF C# executor. It
+    does not access the file system, start CATIA, or open the document.
 
     Args:
         filePath: Absolute Windows path of the CATIA document.
     """
 
-    path = Path(filePath)
+    validated_path = validate_windows_document_path(
+        filePath
+    )
 
-    if not path.is_absolute():
-        raise ValueError(
-            "The CATIA document path must be absolute."
-        )
-
-    extension = path.suffix.lower()
-
-    if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
-        raise ValueError(
-            "Unsupported CATIA document extension: "
-            f"{path.suffix or '[missing extension]'}"
-        )
-
-    return {
-        "status": "action_prepared",
-        "action": "open_cad_document",
-        "arguments": {
-            "filePath": filePath,
+    return create_executor_action(
+        action="open_cad_document",
+        arguments={
+            "filePath": validated_path,
         },
-        "executor": "wpf_csharp",
-        "executed": False,
-    }
+    )
 
 
 @mcp.tool
 def get_active_document() -> dict[str, Any]:
     """
-    Prepare an action to retrieve the active CATIA document.
+    Prepare an action to retrieve the currently active CATIA document.
 
-    Use this tool when the user asks which CATIA document is
-    active, current, selected, or in focus.
+    Use this tool when the user asks which CATIA document is current,
+    active, selected, or in focus.
 
-    This tool does not query CATIA itself. It returns a typed
-    action for execution by the external WPF C# CATIA executor.
+    Use the external executor even if a CATIA context snapshot was
+    supplied because the current CATIA state may have changed.
+
+    This tool does not query CATIA directly.
     """
 
-    return {
-        "status": "action_prepared",
-        "action": "get_active_document",
-        "arguments": {},
-        "executor": "wpf_csharp",
-        "executed": False,
-    }
+    return create_executor_action(
+        action="get_active_document",
+        arguments={},
+    )
 
 
 @mcp.tool
 def create_cad_document(
-    documentType: Literal["CATProduct", "CATPart", "CATDrawing"],
+    documentType: DocumentType,
 ) -> dict[str, Any]:
     """
-    Prepare an action to create a new CATIA document.
+    Prepare an action to create a new, unsaved CATIA document.
 
-    Use this tool when the user asks to create, start, or make a new
-    CATIA part, product, assembly, or drawing document.
+    Map user terminology as follows:
 
-    Map "part" to CATPart, "product" or "assembly" to CATProduct, and
-    "drawing" to CATDrawing.
+    - part to CATPart
+    - product or assembly to CATProduct
+    - drawing to CATDrawing
 
-    This tool does not require a file path. The new document is created
-    unsaved in CATIA; saving it to disk is a separate action.
+    Creating a document does not save it to disk. Saving is a separate
+    operation and must use a separately approved tool when available.
 
-    This tool does not create the document itself. It returns a validated
-    action for execution by the external WPF C# CATIA executor.
+    This tool prepares an action for the external WPF C# executor. It
+    does not create the document directly.
 
     Args:
-        documentType: The type of CATIA document to create.
+        documentType: Type of CATIA document to create.
     """
 
-    return {
-        "status": "action_prepared",
-        "action": "create_cad_document",
-        "arguments": {
+    return create_executor_action(
+        action="create_cad_document",
+        arguments={
             "documentType": documentType,
         },
-        "executor": "wpf_csharp",
-        "executed": False,
-    }
+    )
 
 
 @mcp.tool
 def close_cad_document(
-    targetMode: Literal["active", "named", "all"],
+    targetMode: CloseTargetMode,
     documentName: str | None = None,
 ) -> dict[str, Any]:
     """
     Prepare an action to close one or more open CATIA documents.
 
-    Use targetMode="active" when the user refers to the active,
-    current, or currently focused CATIA document. Also use
-    targetMode="active" when the user asks to close the open
-    document and exactly one CATIA document is currently open.
+    Use targetMode="active" when the user explicitly refers to the
+    active or current document. It may also be used when the user asks
+    to close the open document and trusted CATIA context confirms that
+    exactly one document is open.
 
-    Use targetMode="named" when the user explicitly provides or
-    resolves a document name. documentName is required in that
-    case; preserve it exactly as provided or resolved.
+    Use targetMode="named" when the user specifies or unambiguously
+    identifies a document. documentName is required in this mode.
 
-    Use targetMode="all" only when the user explicitly asks to
-    close all open CATIA documents.
+    Use targetMode="all" only when the user explicitly asks to close
+    every open CATIA document.
 
-    Do not use this tool when the user merely says "close a
-    document" or "close document" without identifying a document,
-    or when more than one document is open and none is specified.
-    Ask the user which document should be closed instead.
+    If the requested document cannot be identified unambiguously, the
+    orchestrator must ask for clarification instead of calling this
+    tool.
 
-    This tool prepares an action for the external WPF C# executor.
-    It does not access CATIA directly.
+    This action does not specify save behavior. The C# executor must
+    reject the operation if closing the document could discard unsaved
+    changes without an approved save or discard policy.
+
+    Args:
+        targetMode: Whether to close the active, named, or all
+            documents.
+        documentName: Exact document name when targetMode is named.
     """
+
+    normalized_document_name: str | None = None
 
     if targetMode == "named":
-        if documentName is None or not documentName.strip():
+        if documentName is None:
             raise ValueError(
-                "documentName is required when "
-                "targetMode is named."
+                "documentName is required when targetMode "
+                "is named."
             )
 
-        documentName = documentName.strip()
+        normalized_document_name = (
+            normalize_document_name(
+                documentName
+            )
+        )
 
-    elif documentName is not None:
-        documentName = None
-
-    return {
-        "status": "action_prepared",
-        "action": "close_cad_document",
-        "arguments": {
+    return create_executor_action(
+        action="close_cad_document",
+        arguments={
             "targetMode": targetMode,
-            "documentName": documentName,
+            "documentName": (
+                normalized_document_name
+            ),
         },
-        "executor": "wpf_csharp",
-        "executed": False,
-    }
+    )
 
-@mcp.tool
-def request_clarification(
-    question: str,
-    missingField: str,
-) -> dict[str, Any]:
+
+# -------------------------------------------------------------------------
+# Server entry point
+# -------------------------------------------------------------------------
+
+def run_server() -> None:
     """
-    Ask the user for information required before a CATIA action
-    can be prepared.
-
-    Use this tool when the request is potentially supported but
-    required information is missing or ambiguous.
-
-    For example, if the user says only "close document", ask
-    which open document should be closed.
-
-    This tool is handled by the Python Agent workflow. It must
-    never be sent to the C# CATIA executor.
+    Run the local CATIA MCP HTTP server.
     """
 
-    if not question.strip():
-        raise ValueError(
-            "A clarification question is required."
-        )
-
-    if not missingField.strip():
-        raise ValueError(
-            "The missing field name is required."
-        )
-
-    return {
-        "status": "clarification_required",
-        "question": question.strip(),
-        "missingField": missingField.strip(),
-    }
-
-
-@mcp.tool
-def route_to_general_chat() -> dict[str, Any]:
-    """
-    Signal that this message does not require a CATIA action.
-
-    Use this tool for greetings, general questions, requests for
-    explanation, or anything else unrelated to the CATIA tools above.
-
-    Do not attempt to answer the user's question yourself. Call this
-    tool instead and let a separate general-purpose assistant respond.
-
-    This tool is handled by the Python Agent workflow. It must never
-    be sent to the C# CATIA executor.
-    """
-
-    return {
-        "status": "non_agentic",
-        "action": "route_to_general_chat",
-        "arguments": {},
-        "executor": "external_chat_llm",
-        "executed": False,
-    }
-
-
-if __name__ == "__main__":
     mcp.run(
         transport="http",
         host="127.0.0.1",
         port=8001,
     )
+
+
+if __name__ == "__main__":
+    run_server()

@@ -1,12 +1,24 @@
-# CATIA Agentic AI Backend
+# CATIA Agent Backend
 
-## Python, FastAPI, LangGraph, Ollama, Qwen3, and MCP Architecture Guide
+## Python, FastAPI, LangGraph, MCP, and Model-Provider Architecture Guide
 
 ## 1. Purpose
 
-This document explains the Python side of the CATIA Agentic AI proof of concept. The backend receives a natural-language CATIA command, discovers approved tools from an MCP server, asks a local Qwen3 model to select a tool, validates the proposed action, pauses the LangGraph workflow while an external C# executor performs the CATIA operation, and then resumes the workflow with the execution result.
+This document describes the Python side of the CATIA Agent. The backend
+receives a natural-language CATIA command, discovers approved tools from an
+MCP server, asks a tool-calling model to select a tool, validates the
+proposed action through several deterministic layers, pauses the LangGraph
+workflow while an external C# executor performs the CATIA operation, and
+then resumes the workflow with the execution result.
 
-The Python backend does not execute CATIA COM automation. CATIA operations remain in the .NET application.
+The Python backend does not execute CATIA COM automation. CATIA operations
+remain in the external .NET application.
+
+The current model provider is a local Ollama installation hosting Qwen3.
+The planner is isolated behind a provider-neutral `ToolCallingModelClient`
+protocol so an Azure implementation can replace it without changing the
+graph, MCP catalog, API contracts, or validation policy. See Sections 4
+and 9.
 
 ## 2. High-level architecture
 
@@ -26,9 +38,9 @@ LangGraph workflow
     |                       +--> Descriptions
     |                       +--> JSON input schemas
     |
-    +--> Ollama API :11434 --> Qwen3 4B
-    |                           |
-    |                           +--> Native tool call
+    +--> ToolCallingModelClient --> Ollama :11434 --> Qwen3 4B (today)
+    |                                                    |
+    |                                                    +--> Native tool call
     |
     +--> Pydantic and policy validation
     |
@@ -45,13 +57,20 @@ completed or execution_failed response
 
 ### Responsibilities
 
-- **FastAPI** exposes the local REST API, OpenAPI schema, Swagger UI, health checks, readiness checks, and diagnostic endpoints.
-- **LangGraph** manages state, routing, interruption, resumption, and completion of Agent runs.
-- **Ollama** hosts the local Qwen model and exposes its local inference API.
-- **Qwen3** interprets the user command and selects an available tool through native tool calling.
-- **MCP server** is the authoritative catalog of approved CATIA tool names, descriptions, and argument schemas.
-- **Pydantic** validates API payloads, model-selected actions, CATIA context, and external execution results.
-- **The .NET client** remains the final executor and calls the CATIA COM API.
+- **FastAPI** exposes the REST API, versioned under `/api/v1`, plus health,
+  readiness, tool diagnostics, an OpenAPI schema, and Swagger UI.
+- **LangGraph** manages state, routing, interruption, resumption, and
+  completion of Agent runs.
+- **MCP server** is the authoritative catalog of approved CATIA executor
+  tool names, descriptions, and argument schemas.
+- **ToolCallingModelClient** is a provider-neutral interface. Today it is
+  implemented by `OllamaToolCallingModelClient`; an Azure implementation can
+  replace it without changes to the rest of the codebase.
+- **Ollama and Qwen3** provide the current local tool-calling model.
+- **Pydantic** validates API payloads, orchestrator and executor tool
+  calls, CATIA context, and external execution results.
+- **The .NET client** remains the final executor and calls the CATIA COM
+  API.
 
 ## 3. Local services and ports
 
@@ -63,7 +82,9 @@ FastAPI Swagger      http://127.0.0.1:8000/docs
 FastAPI OpenAPI      http://127.0.0.1:8000/openapi.json
 ```
 
-All POC services are bound to loopback addresses. They are not intended to be exposed directly to the network.
+All development services are bound to loopback addresses. In production
+`enable_api_docs` is disabled by policy (see Section 6), and `/docs`,
+`/redoc`, and `/openapi.json` are not served.
 
 ## 4. Technology stack
 
@@ -76,9 +97,9 @@ All POC services are bound to loopback addresses. They are not intended to be ex
 - FastMCP
 - Ollama Python client
 - Ollama for Windows
-- Qwen3 4B
+- Qwen3 4B (current model)
 
-The initial Conda environment was created with:
+Environment setup used for development:
 
 ```powershell
 conda create -n catia-agent python=3.11 -y
@@ -93,7 +114,7 @@ python -m pip install fastapi "uvicorn[standard]" langgraph
 python -m pip install "fastmcp>=3.4,<4"
 ```
 
-## 5. Suggested project structure
+## 5. Project structure
 
 ```text
 catia-agent-poc/
@@ -117,7 +138,6 @@ catia-agent-poc/
 |   |-- models.py
 |   |-- planner.py
 |   |-- readiness.py
-|   |-- tool_registry_legacy.py
 |
 |-- catia_mcp/
 |   |-- __init__.py
@@ -138,44 +158,94 @@ catia-agent-poc/
 Automated tests live under `tests/` and are run with `pytest` (configured
 by `pytest.ini`). Tests marked `integration` require a local Ollama and the
 CATIA MCP server; the rest run without them. `show_graph.py` remains useful
-for visualizing the compiled LangGraph, and Swagger and Postman are still
-the recommended way to exercise the API end-to-end.
+for visualizing the compiled LangGraph, and Swagger and Postman are the
+recommended way to exercise the API end-to-end.
 
-The older hard-coded tool registry should be removed or retained only as a temporary legacy reference after MCP discovery is stable.
+The previous hard-coded tool registry has been removed. MCP is the sole
+source of executor tool definitions.
 
 ## 6. Configuration
 
-### `.env`
+### Environment variables
+
+All settings use the `CATIA_AGENT_` prefix and are loaded once by
+`pydantic-settings` (see `catia_agent/config.py`). A local `.env` file is
+supported for development.
+
+Representative `.env` (see `.env.example` for the full list):
 
 ```dotenv
 CATIA_AGENT_APP_NAME=CATIA Agent API
-CATIA_AGENT_APP_VERSION=0.2.0
+CATIA_AGENT_APP_VERSION=1.0.0
 CATIA_AGENT_ENVIRONMENT=development
 
 CATIA_AGENT_API_HOST=127.0.0.1
 CATIA_AGENT_API_PORT=8000
+CATIA_AGENT_API_PREFIX=/api/v1
+CATIA_AGENT_ENABLE_API_DOCS=true
+CATIA_AGENT_REQUEST_TIMEOUT_SECONDS=60
+CATIA_AGENT_REQUEST_BODY_MAX_BYTES=1048576
+
+CATIA_AGENT_MAX_USER_MESSAGE_CHARACTERS=10000
+CATIA_AGENT_MAX_SESSION_ID_CHARACTERS=128
+CATIA_AGENT_MAX_REQUEST_ID_CHARACTERS=128
 
 CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
 CATIA_AGENT_OLLAMA_MODEL=qwen3:4b
+CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS=60
+CATIA_AGENT_MODEL_TEMPERATURE=0
 
 CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
+CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
 CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
+
 CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES=20
 CATIA_AGENT_MAX_ACTIONS_PER_RUN=20
+CATIA_AGENT_MAX_COMPLETED_ACTION_RESULT_BYTES=262144
+CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS=1800
 
 CATIA_AGENT_LOG_LEVEL=INFO
 CATIA_AGENT_ENABLE_JSON_LOGS=true
+CATIA_AGENT_INCLUDE_TECHNICAL_DETAILS_IN_ERRORS=false
+
+CATIA_AGENT_ENABLE_TOOL_CATALOG_ENDPOINT=true
+CATIA_AGENT_ENABLE_TOOL_CACHE_CLEAR_ENDPOINT=true
+CATIA_AGENT_ADMIN_API_KEY=
 ```
 
 ### Configuration principles
 
 - Keep `.env` out of source control.
 - Commit `.env.example` with safe defaults.
-- Load settings once through `pydantic-settings`.
-- Restart FastAPI after changing cached process-level settings.
+- Settings are cached for the life of the Python process. Restart the
+  application after changing environment variables.
 - Do not hard-code model names or service URLs across modules.
 
+### Environment policy
+
+`Settings.validate_environment_policy` enforces production-safe defaults.
+When `CATIA_AGENT_ENVIRONMENT=production`:
+
+- `CATIA_AGENT_ENABLE_API_DOCS` must be `false`.
+- `CATIA_AGENT_INCLUDE_TECHNICAL_DETAILS_IN_ERRORS` must be `false`
+  (technical exception messages are never returned to clients).
+- If `CATIA_AGENT_ENABLE_TOOL_CACHE_CLEAR_ENDPOINT` is `true`,
+  `CATIA_AGENT_ADMIN_API_KEY` must be set.
+
+The application fails to start if any of these are violated.
+
+### Administrative authorization
+
+The `POST /api/v1/tools/cache/clear` endpoint is protected by an
+`X-Admin-API-Key` header when `CATIA_AGENT_ADMIN_API_KEY` is configured.
+The check uses a constant-time comparison. When the key is empty (local
+development only), the endpoint is unauthenticated so Postman and Swagger
+can exercise it. In production the key is mandatory (see above).
+
 ## 7. Core API endpoints
+
+All Agent and tool endpoints are versioned under `CATIA_AGENT_API_PREFIX`
+(`/api/v1` by default). Health endpoints are unversioned.
 
 ### Liveness
 
@@ -183,7 +253,8 @@ CATIA_AGENT_ENABLE_JSON_LOGS=true
 GET /health
 ```
 
-Confirms that FastAPI is running. This should not perform expensive dependency checks.
+Returns `{"status": "healthy", ...}`. This must remain cheap and must not
+perform dependency checks.
 
 ### Readiness
 
@@ -191,27 +262,34 @@ Confirms that FastAPI is running. This should not perform expensive dependency c
 GET /ready
 ```
 
-Verifies that:
+Runs the configured `ReadinessCheck` implementations concurrently and
+returns `200` when every check reports `available`, otherwise `503`.
+The current checks verify:
 
-- Ollama is reachable.
-- `qwen3:4b` is installed.
-- The CATIA MCP server is reachable.
-- The MCP server exposes tools.
+- The model provider is reachable and the configured model is installed.
+- The CATIA MCP server is reachable and exposes at least one usable tool.
+
+The Ollama readiness check is implemented by `OllamaReadinessCheck` and
+can be swapped for an Azure equivalent without changing the aggregate
+report (see `catia_agent/readiness.py`).
 
 ### Tool diagnostics
 
 ```http
-GET /api/tools
-GET /api/tools?refresh=true
-POST /api/tools/cache/clear
+GET  /api/v1/tools
+GET  /api/v1/tools?refresh=true
+POST /api/v1/tools/cache/clear         (X-Admin-API-Key required in prod)
 ```
 
-These endpoints expose MCP-discovered tool metadata through Swagger and Postman. The cache-clear operation is a `POST`, not a browser `GET`.
+These endpoints expose the MCP-discovered tool metadata that the planner
+sees. `/api/v1/tools` is disabled entirely by
+`CATIA_AGENT_ENABLE_TOOL_CATALOG_ENDPOINT=false`. The cache-clear endpoint
+requires the admin key when configured.
 
 ### Start an Agent run
 
 ```http
-POST /api/agent/runs
+POST /api/v1/agent/runs
 ```
 
 The caller does not select a chat or agent mode. Every message goes through
@@ -250,25 +328,29 @@ Example agentic response:
 }
 ```
 
-Example chat response, for a message such as "what file types can you open?":
+Example chat response, for a message such as "what file types can you
+open?":
 
 ```json
 {
   "status": "non_agentic",
   "sessionId": "session-001",
   "runId": "generated-run-id",
-  "message": "This request does not require a CATIA action. Route it to the general chat service."
+  "message": "This request does not require a CATIA execution action.",
+  "routeTarget": "general_chat",
+  "routeReason": "general_conversation"
 }
 ```
 
-On `non_agentic`, the Python backend has not answered the user's message and
-never will. The `.message` field is a routing note for logs, not an answer.
-The caller is responsible for sending the original message to its own
-general-purpose chat model (for example, GPT-4) and returning that answer to
-the user instead.
+On `non_agentic`, the Python backend has not answered the user's message
+and never will. The `message` field is a routing note for logs, not an
+answer. The caller is responsible for sending the original message to its
+own general-purpose chat model (for example, GPT-4) and returning that
+answer to the user.
 
-Example response after a multi-action request such as "open Gearbox.CATProduct
-and then close it" completes both steps (see Section 8.2):
+Example response after a multi-action request such as "open
+Gearbox.CATProduct and then close it" completes both steps (see
+Section 8.2):
 
 ```json
 {
@@ -276,37 +358,39 @@ and then close it" completes both steps (see Section 8.2):
   "sessionId": "session-001",
   "runId": "generated-run-id",
   "actionId": "generated-action-id-2",
-  "message": "Gearbox.CATProduct was opened successfully. Gearbox.CATProduct was closed successfully.",
-  "data": {
-    "closedDocuments": ["Gearbox.CATProduct"]
-  },
+  "message": "Gearbox.CATProduct was opened successfully. Gearbox.CATProduct closed successfully.",
+  "data": {"closedDocuments": ["Gearbox.CATProduct"]},
   "completedActions": [
     {
       "action": "open_cad_document",
       "actionId": "generated-action-id-1",
+      "arguments": {"filePath": "C:\\TestData\\Gearbox.CATProduct"},
       "message": "Gearbox.CATProduct was opened successfully.",
       "data": {"documentName": "Gearbox.CATProduct"}
     },
     {
       "action": "close_cad_document",
       "actionId": "generated-action-id-2",
-      "message": "Gearbox.CATProduct was closed successfully.",
+      "arguments": {"targetMode": "active", "documentName": null},
+      "message": "Gearbox.CATProduct closed successfully.",
       "data": {"closedDocuments": ["Gearbox.CATProduct"]}
     }
   ]
 }
 ```
 
-`completedActions` appears on any terminal response (`completed`,
-`execution_failed`, `non_agentic`, `clarification_required`,
-`unsupported_request`) once at least one action in the sequence has already
-succeeded. It is omitted entirely when the sequence never got past the
-first step.
+`completedActions` appears on any terminal response
+(`completed`, `execution_failed`, `non_agentic`,
+`clarification_required`, `unsupported_request`, `planning_error`) once
+at least one action in the sequence has already succeeded. On `completed`
+and `execution_failed` responses the field is always present (possibly
+empty). On the other statuses it is omitted entirely when the sequence
+never got past the first step.
 
 ### Submit an execution result
 
 ```http
-POST /api/agent/runs/{runId}/action-results
+POST /api/v1/agent/runs/{runId}/action-results
 ```
 
 Example success request:
@@ -325,6 +409,22 @@ Example success request:
 }
 ```
 
+Example failure request:
+
+```json
+{
+  "actionId": "generated-action-id",
+  "success": false,
+  "data": null,
+  "errorCode": "CATIA_DOCUMENT_NOT_FOUND",
+  "errorMessage": "The requested CATIA document could not be located."
+}
+```
+
+`errorCode` and `errorMessage` are required when `success` is `false` and
+forbidden when `success` is `true` (`ActionExecutionResultRequest`
+enforces this at the Pydantic level).
+
 Example completion:
 
 ```json
@@ -337,48 +437,81 @@ Example completion:
   "data": {
     "documentName": "Gearbox.CATProduct",
     "fullPath": "C:\\TestData\\Gearbox.CATProduct"
-  }
+  },
+  "completedActions": [ ... ]
 }
 ```
 
 ### 7.5 Error contract
 
-Every non-2xx response from `POST /api/agent/runs` and
-`POST /api/agent/runs/{runId}/action-results` uses the same envelope:
+Every non-2xx response uses the same envelope:
 
 ```json
 {
   "detail": {
     "status": "<short_status>",
     "errorCode": "<STABLE_CODE>",
-    "message": "<human-readable>"
+    "message": "<human-readable>",
+    "technicalDetail": "<optional, dev/test only>",
+    "validationErrors": [ ... ]
   }
 }
 ```
 
-Stable error codes and the endpoints that produce them:
+`technicalDetail` is only included when
+`CATIA_AGENT_INCLUDE_TECHNICAL_DETAILS_IN_ERRORS=true`. Production must
+keep this disabled. `validationErrors` is included when the failure comes
+from Pydantic and carries the underlying error list.
 
-| HTTP | errorCode                       | Where                | Meaning                                                                                                    |
-|------|---------------------------------|----------------------|------------------------------------------------------------------------------------------------------------|
-| 400  | `ACTION_VALIDATION_FAILED`      | `/runs`              | Deterministic Python policy rejected the model-selected action (path, extension, argument shape, and so on). |
-| 409  | `AGENT_RUN_STATE_CONFLICT`      | `/runs`, action-results | The session or run is not in a state compatible with the request (see Section 8, run-state guards).       |
-| 404  | `AGENT_RUN_NOT_FOUND`           | action-results       | No pending run matches the supplied `runId`.                                                               |
-| 422  | `ACTION_RESULT_VALIDATION_FAILED` | action-results     | The submitted `ActionExecutionResultRequest` failed Pydantic validation.                                    |
-| 422  | `TOOL_SCHEMA_VALIDATION_FAILED` | `/runs`              | Qwen returned a tool call that did not match the required Pydantic action model.                            |
-| 422  | `AGENT_RUN_RESUME_FAILED`       | action-results       | A planner or validation error raised during resume that is not a state conflict.                            |
-| 503  | `MCP_TOOL_DISCOVERY_FAILED`     | both                 | The MCP server was unreachable or returned no usable tool catalog.                                          |
-| 503  | `OLLAMA_REQUEST_FAILED`         | both                 | Ollama returned an error while planning.                                                                    |
-| 503  | `OLLAMA_CONNECTION_FAILED`      | both                 | The Ollama process could not be reached at all.                                                             |
+Stable error codes produced by the API:
 
-`AGENT_RUN_STATE_CONFLICT` is deliberately narrow — only three specific
-run-state guards raise it (see Section 8). Planner and executor errors
-during resume surface as `AGENT_RUN_RESUME_FAILED` instead, so the .NET
-client can distinguish "the run is in the wrong state" from "the planner
-crashed" and route them differently in the UI.
+| HTTP | errorCode                          | Source                                       | Meaning                                                                                     |
+|------|------------------------------------|----------------------------------------------|---------------------------------------------------------------------------------------------|
+| 400  | `INVALID_CONTENT_LENGTH`           | request middleware                           | The `Content-Length` header could not be parsed.                                            |
+| 401  | `ADMIN_API_KEY_REQUIRED`           | admin dependency                             | An admin endpoint was called without `X-Admin-API-Key`.                                     |
+| 403  | `ADMIN_API_KEY_INVALID`            | admin dependency                             | The supplied admin key did not match (constant-time compare).                               |
+| 404  | `AGENT_RUN_NOT_FOUND`              | action-results                               | No pending run matches the supplied `runId`.                                                |
+| 409  | `AGENT_RUN_STATE_CONFLICT`         | `/agent/runs`, action-results                | The session or run is not in a state compatible with the request (see Section 8).           |
+| 413  | `REQUEST_BODY_TOO_LARGE`           | request middleware                           | Request body exceeds `CATIA_AGENT_REQUEST_BODY_MAX_BYTES`.                                  |
+| 422  | `REQUEST_VALIDATION_FAILED`        | FastAPI request validation                   | The submitted payload did not match the API contract.                                       |
+| 422  | `MODEL_SCHEMA_VALIDATION_FAILED`   | planner and record-action-result             | The model returned a tool call or the executor returned a result that failed Pydantic.      |
+| 500  | `INTERNAL_SERVER_ERROR`            | request middleware                           | An unhandled exception was caught. Logged with a stack trace, not exposed to the client.    |
+| 503  | `MCP_REQUEST_FAILED`               | any endpoint that touches MCP                | The CATIA MCP tool service was unreachable or returned an invalid catalog.                  |
+| 503  | `MODEL_PROVIDER_FAILED`            | planner                                      | The configured tool-calling model provider failed (non-timeout).                            |
+| 503  | `OLLAMA_REQUEST_FAILED`            | planner                                      | Ollama returned an error while the current provider was making a request.                   |
+| 504  | `MODEL_REQUEST_TIMED_OUT`          | planner                                      | The model did not respond within `CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS`.               |
+| 504  | `REQUEST_TIMED_OUT`                | request middleware                           | The request did not complete within `CATIA_AGENT_REQUEST_TIMEOUT_SECONDS`.                  |
+
+`AGENT_RUN_STATE_CONFLICT` is deliberately narrow — only the three
+run-state guards enumerated in Section 8 raise it. All other failures
+surfaced from resume paths (planner failures, MCP outage, model outage,
+unknown-tool rejection) map to their own dedicated codes above.
+
+Planner failures produce a normal 200 response with
+`status: "planning_error"` and an internal `errorCode` from the following
+set (see `PlanningErrorResult`):
+
+- `MODEL_RETURNED_NO_DECISION` — only on the first planning pass. If the
+  model returns no tool call on a *follow-up* pass and at least one
+  action has already completed, the planner treats it as an implicit
+  `complete_request` and returns `completed` instead (see Section 8.2).
+- `MODEL_RETURNED_MULTIPLE_DECISIONS`
+- `MODEL_RETURNED_INVALID_TOOL`
+- `MODEL_RETURNED_INVALID_ARGUMENTS`
+
+These are terminal Agent results, not HTTP errors, and are safe to render
+to the user because they contain no technical detail. When one occurs
+mid-sequence, the response includes the accumulated `completedActions`
+so the caller can still show what succeeded before the planner failed.
+
+Every response includes the `X-Request-ID` header. The middleware accepts
+a caller-supplied `X-Request-ID` if it matches
+`^[A-Za-z0-9._:-]+$` and is within the configured length; otherwise a
+fresh UUID is used so logs and headers cannot be poisoned.
 
 ## 8. LangGraph workflow
 
-The current graph follows this state machine:
+The compiled graph (see `catia_agent/graph.py`):
 
 ```text
 START
@@ -386,134 +519,152 @@ START
   v
 plan_action
   |
-  +--> non_agentic, clarification_required,
-  |    unsupported (first action), or invalid
-  |       |
-  |       v
-  |   prepare_terminal_response
-  |       |
-  |       v
-  |      END
-  |
-  +--> unsupported (mid-sequence, nothing left to do)
-  |       |
-  |       v
-  |   prepare_sequence_completed_response
-  |       |
-  |       v
-  |      END
-  |
   +--> action_required
+  |       |
+  |       v
+  |   prepare_action
+  |       |
+  |       v
+  |   await_action_result
+  |       |
+  |       | interrupt
+  |       v
+  |   External C# execution
+  |       |
+  |       | resume with Command(resume=...)
+  |       v
+  |   record_action_result
+  |       |
+  |       +--> failed --------------------> END
+  |       |
+  |       +--> succeeded, loop back ---> plan_action
+  |
+  +--> request_completed (from complete_request or duplicate guard)
+  |       |
+  |       v
+  |   prepare_sequence_completed
+  |       |
+  |       v
+  |      END
+  |
+  +--> non_agentic, clarification_required,
+       unsupported_request, invalid_request, planning_error
           |
           v
-      prepare_action
+      prepare_terminal_response
           |
           v
-      await_action_result
-          |
-          | interrupt
-          v
-      External C# execution
-          |
-          | resume with Command(resume=...)
-          v
-      prepare_completion (records the result)
-          |
-          +--> failed --------------------> END
-          |
-          +--> succeeded, loop back ---> plan_action
+         END
 ```
 
 ### 8.1 Chat vs agentic orchestration
 
 The .NET client sends only the user message. It does not choose a chat or
-agent mode. Deciding that is the Python orchestrator's job, and Qwen only
-makes the routing decision. It never answers the user's message itself:
+agent mode. Deciding that is the orchestrator's job. The model only makes
+the routing decision through a tool call. It never answers the user
+directly:
 
-- If Qwen selects a CATIA tool, the request is agentic. It proceeds through
-  `prepare_action` → `await_action_result` → `prepare_completion` exactly as
-  before.
-- If Qwen determines the request does not require a CATIA action (a
-  greeting, general question, or anything unrelated to CATIA), it must call
-  the `route_to_general_chat` meta-tool instead of answering. This returns
-  `non_agentic` through `prepare_terminal_response`. The `.message` field is
-  a routing note, not an answer, and the caller must route the original
-  message to a separate general-purpose chat model (for example, GPT-4) and
-  return that model's answer to the user.
-- If the request clearly needs a CATIA action but no available tool
-  supports it yet, Qwen calls no tool at all, and the fallback
-  `unsupported_request` result is returned. This case stays internal and is
-  not rerouted, because it is still CATIA-specific, just not implemented.
+- If the model selects a CATIA MCP tool, the request is agentic. It
+  proceeds through `prepare_action` → `await_action_result` →
+  `record_action_result`.
+- If the model determines the request does not require a CATIA action, it
+  must call the `route_to_general_chat` orchestrator tool. This returns
+  `non_agentic` through `prepare_terminal_response`. The `.message` field
+  is a routing note, not an answer, and the caller must route the original
+  message to a separate general-purpose chat model and return that
+  model's answer to the user.
+- If the request clearly requires execution but no approved tool supports
+  it, the model must call `report_unsupported_catia_action`. This returns
+  `unsupported_request` with a `requestedCapability` and `reason`.
+- If required information is missing or ambiguous (for example, "close a
+  document" with multiple open documents), the model must call
+  `request_clarification`. This returns `clarification_required` with a
+  `question` and `missingField`.
+- During follow-up planning after one or more actions have already
+  completed in the same run, the model can also call `complete_request` to
+  signal that nothing remains. This produces a `RequestCompletedResult`
+  which routes to `prepare_sequence_completed`.
 
-Routing through an explicit tool call (`route_to_general_chat`) rather than
-parsing free-form text keeps the decision structured and reliable, matches
-how every other decision in this codebase is made (typed tool calls, never
-free text), and avoids spending tokens on an answer that would only be
-discarded. See `catia_agent/planner.py` and `catia_mcp/server.py`.
+Routing through explicit tool calls (`route_to_general_chat`,
+`report_unsupported_catia_action`, `request_clarification`,
+`complete_request`) rather than free-form text keeps the decision
+structured and reliable. These four tools are orchestrator-only and are
+defined in `catia_agent/planner.py`; they are deliberately not published
+by the MCP server because they are not CATIA executor tools.
 
 ### 8.2 Sequential multi-action requests
 
-A single message can require more than one CATIA action, for example "open
-Gearbox.CATProduct and Frame.CATProduct, then close XYZ.CATPart". Qwen is
-not asked to enumerate every step up front. Instead, the planner is called
-again after each action succeeds, with that action's outcome added to the
-conversation context, so it can decide what (if anything) from the original
-request still remains:
+A single message can require more than one CATIA action, for example
+"open Gearbox.CATProduct and Frame.CATProduct, then close XYZ.CATPart".
+The model is not asked to enumerate every step up front. Instead, the
+planner is called again after each action succeeds, with that action's
+outcome added to the conversation context, so it can decide what (if
+anything) from the original request still remains:
 
-1. `plan_action` runs, Qwen proposes one action, it executes.
-2. On success, `prepare_completion` records the result and loops back to
-   `plan_action` instead of finishing.
-3. `plan_action` runs again with the original message plus a note of what
-   was just completed. If Qwen proposes another action, the loop repeats.
-   If Qwen decides nothing remains, the run finalizes as `completed` with
-   every step's message joined together.
+1. `plan_action` runs, the model proposes one action, it executes.
+2. On success, `record_action_result` appends the action's structured
+   record and its assistant-role progress message and loops back to
+   `plan_action`.
+3. `plan_action` runs again with the original message plus the progress
+   messages and an explicit list of already-completed actions with their
+   arguments. If the model proposes another CATIA action, the loop
+   repeats. If the model calls `complete_request`, the run finalizes as
+   `completed` with every step's message joined together.
 
-Four things can end the sequence early:
+Five things can end the sequence early:
 
-- **A failure stops it immediately.** If any action fails, the run ends
-  right there as `execution_failed`. Actions not yet attempted are never
+- **A failure stops it immediately.** If any action fails,
+  `record_action_result` writes the final response directly and the run
+  ends as `execution_failed`. Actions not yet attempted are never
   attempted. The response combines what succeeded so far with the failure.
 - **`request_clarification` or `route_to_general_chat` can appear
-  mid-sequence.** For example, "open Gearbox.CATProduct, then close a
-  document" completes the open, then asks which document to close via
-  `clarification_required`. Both stop the sequence the same way a failure
-  does, but with their own status instead of `execution_failed`.
-- **A duplicate-action guard stops repeats.** If the planner proposes an
-  action whose name AND arguments exactly match one already completed in
-  the same run, `plan_action` intercepts it before it dispatches, logs
-  `planner_duplicate_action_detected`, and finalizes the run as
-  `completed` with what has been done so far. This is the hard rail
-  against Qwen 3B re-selecting the just-completed tool on the follow-up
-  planning pass; it fires even if the model ignores the explicit
-  "do not repeat" system message described below.
+  mid-sequence.** Both stop the sequence the same way a failure does, but
+  with their own status.
+- **Duplicate-action guard with one-shot corrective retry.** If the
+  planner proposes an action whose name AND arguments exactly match one
+  already completed in the same run, `plan_action` logs
+  `planner_duplicate_action_detected` and calls the planner once more
+  with a targeted corrective system message that names the duplicated
+  action and re-anchors the goal-delta reasoning. If the retry produces
+  a different action (or `complete_request`), the run continues normally
+  and logs `planner_duplicate_retry_recovered`. If the retry duplicates
+  again, the guard falls back to `RequestCompletedResult`, the run
+  finalizes as `completed` with what has been done so far, and
+  `planner_duplicate_retry_failed` is logged. This is the hard rail
+  against small tool-calling models re-selecting a just-completed tool
+  on the follow-up planning pass.
+- **Silent-model recovery.** If the model returns no tool call at all
+  on a follow-up planning pass (empty `tool_calls`) and at least one
+  action has already completed in the run, the planner treats that as
+  an implicit `complete_request` and finalizes the run as `completed`.
+  This is logged as `planner_no_decision_treated_as_complete`. On the
+  first planning pass (no completed actions yet), an empty response is
+  still a real failure and finalizes as `planning_error` with
+  `MODEL_RETURNED_NO_DECISION`.
 - **A safety cap (`CATIA_AGENT_MAX_ACTIONS_PER_RUN`, default 20) stops
   runaway sequences.** If a planning error or model quirk keeps proposing
   *different* actions indefinitely (bypassing the duplicate guard), the
-  run stops with `unsupported_request` once the cap is reached, reporting
-  everything completed up to that point.
+  run stops with `unsupported_request` and `reason: action_limit_reached`
+  once the cap is reached, reporting everything completed up to that
+  point.
 
 Every follow-up planning call after a successful action is given a
-dedicated system message listing the actions already completed in the
-run with their exact arguments, plus an explicit instruction not to
-repeat them. Small local models like Qwen 3B do not always obey this,
-which is why the duplicate-action guard above is enforced deterministically
-in the graph rather than left as a prompt hint. See `catia_agent/graph.py`
-and `catia_agent/planner.py`.
+"goal-delta" system message: the original user request is quoted, the
+actions already completed are listed with their exact arguments, and the
+model is asked to compare the two and either select the single next
+remaining CATIA action or call `complete_request`. Small local models
+like Qwen 3B do not always obey this framing, which is why the
+duplicate-action guard (with corrective retry) and the silent-model
+recovery above are enforced deterministically in the graph rather than
+left as prompt hints alone. See `catia_agent/graph.py` and
+`catia_agent/planner.py`.
 
-When Qwen returns more than one tool call on the same planning pass
-(occasional Qwen 3B behavior on the follow-up call), the planner logs
-`qwen_multiple_tool_calls` and picks a real CATIA tool over the
-`route_to_general_chat` and `request_clarification` meta-tools. This
-keeps the run alive instead of failing the whole planning call, and
-matches the intent of the sequence loop: finish the compound request
-first, only route to general chat when nothing agentic remains.
-
-This calls the planner multiple times (once per action) rather than asking
-Qwen to return several tool calls in one response. Each call stays as
-simple and reliable as a single-action request; nothing about
+This calls the planner multiple times (once per action) rather than
+asking the model to return several tool calls in one response. Each call
+stays as simple and reliable as a single-action request; nothing about
 `plan_catia_action` itself changes to support this; the looping and
-progress-tracking live entirely in `graph.py`. See Section 16 for why this
-is not the same thing as splitting into a supervisor and specialized
+progress-tracking live entirely in `graph.py`. See Section 16 for why
+this is not the same thing as splitting into a supervisor and specialized
 sub-agents.
 
 ### State fields
@@ -527,69 +678,75 @@ action_id
 user_message
 catia_context
 messages
+sequence_progress
 planner_result
 pending_action
 action_result
 completed_actions
-sequence_progress
-sequence_capped
 final_response
 ```
 
-`messages` accumulates the conversation as `{"role", "content"}` pairs after
-every completed or terminal turn. The planner receives a trimmed window of
-this history (`CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES`) so it can
-resolve references such as "the first one" or "that document" against what
-the Agent previously said.
+`messages` accumulates the conversation as `{"role", "content"}` pairs
+after every completed or terminal turn. The planner receives a trimmed
+window of this history (`CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES`)
+so it can resolve references such as "the first one" or "that document"
+against what the Agent previously said.
 
-`completed_actions` and `sequence_progress` exist only for the lifetime of
-one run (see Section 8.2). `completed_actions` accumulates a structured
-entry per successful action (`action`, `actionId`, `arguments`, `message`,
-`data`) for the final `completedActions` response field and for the
-duplicate-action guard in `plan_action`. `sequence_progress` holds one
-short assistant-role turn per completed action so the planner sees
-progress on its next call within the same run. Both are reset to empty at
-the start of every new run; they are never carried over into
-session-level `messages` history.
+`completed_actions` and `sequence_progress` exist only for the lifetime
+of one run (see Section 8.2). `completed_actions` accumulates a
+structured entry per successful action (`action`, `actionId`,
+`arguments`, `message`, `data`) for the final `completedActions`
+response field and for the duplicate-action guard in `plan_action`.
+`sequence_progress` holds one short assistant-role turn per completed
+action so the planner sees progress on its next call within the same
+run. Both are reset to empty at the start of every new run; they are
+never carried over into session-level `messages` history.
 
 ### Identifier semantics
 
-- `sessionId` identifies the conversation or client session. It is now the
+- `sessionId` identifies the conversation or client session. It is the
   LangGraph thread key, so conversation history persists across multiple
   Agent runs within the same session.
-- `runId` identifies one Agent workflow within a session, which may involve
-  more than one action (see Section 8.2).
+- `runId` identifies one Agent workflow within a session, which may
+  involve more than one action (see Section 8.2).
 - `actionId` identifies one externally executed CATIA action. A single
   `runId` can have several `actionId` values in sequence.
 
 Because the thread is keyed by `sessionId` rather than `runId`, the
-action-results endpoint (which only receives a `runId`) resolves the owning
-session through an in-memory `runId -> sessionId` map in `graph.py`. Three
-run-state guards are enforced through a dedicated `AgentRunStateConflictError`,
-which the API surfaces as HTTP 409 with `errorCode: AGENT_RUN_STATE_CONFLICT`:
+action-results endpoint (which only receives a `runId`) resolves the
+owning session through an in-memory `runId -> sessionId` map in
+`graph.py`. Three run-state guards raise
+`AgentRunStateConflictError`, which the API surfaces as HTTP 409 with
+`errorCode: AGENT_RUN_STATE_CONFLICT`:
 
-- Starting a new run on `POST /api/agent/runs` while the same session
+- Starting a new run on `POST /api/v1/agent/runs` while the same session
   still has a pending action result.
 - Submitting an action result whose `runId` does not match the currently
   pending run for that session.
 - Submitting an action result to a run that is not paused at
-  `await_action_result`.
+  `await_action_result`, or whose `actionId` does not match the pending
+  one.
 
 Any other error surfaced from the resume path (planner validation, MCP
-unavailability, Ollama connection failure, unknown-tool policy rejection)
-is mapped to its own dedicated status code and error code so it cannot be
-mistaken for a state conflict. See Section 7.5.
+unavailability, model outage, unknown-tool policy rejection) maps to its
+own dedicated status code and error code (see Section 7.5) so it cannot
+be mistaken for a state conflict.
 
 ### Persistence limitation
 
-The POC uses `InMemorySaver`. Conversation history, pending runs, and the
-`runId -> sessionId` map are all lost when FastAPI restarts or Uvicorn
-reloads. Before production use, replace the checkpointer with a persistent
-store such as SQLite or an approved enterprise data store.
+The current build uses LangGraph's `InMemorySaver`. Conversation history,
+pending runs, and the `runId -> sessionId` map are all lost when FastAPI
+restarts or Uvicorn reloads. Replacing the checkpointer with a persistent
+store (SQLite for a single node, or an approved enterprise datastore for
+horizontal scale) is a prerequisite for production traffic. This is the
+single largest remaining production gap in the Python backend; see
+Section 17.
 
-## 9. Native Qwen tool calling
+## 9. Native tool calling and the model-provider abstraction
 
-Tool selection uses Ollama's native `tools` parameter. Qwen receives function definitions rather than being prompted to write arbitrary JSON.
+Tool selection uses the model provider's native tool-calling interface.
+The model receives typed function definitions rather than being prompted
+to emit arbitrary JSON.
 
 Conceptual tool schema:
 
@@ -598,21 +755,40 @@ Conceptual tool schema:
   "type": "function",
   "function": {
     "name": "open_cad_document",
-    "description": "Open an existing CATIA document using an absolute Windows path.",
+    "description": "Prepare an action to open an existing CATIA document.",
     "parameters": {
       "type": "object",
       "required": ["filePath"],
-      "properties": {
-        "filePath": {
-          "type": "string"
-        }
-      }
+      "properties": {"filePath": {"type": "string"}},
+      "additionalProperties": false
     }
   }
 }
 ```
 
-Qwen selects a tool, but Qwen never executes it. The application validates the tool call and returns it to the .NET executor.
+The planner talks to the model through a provider-neutral
+`ToolCallingModelClient` protocol (see `catia_agent/planner.py`):
+
+```python
+class ToolCallingModelClient(Protocol):
+    async def select_tool(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> Any: ...
+```
+
+`OllamaToolCallingModelClient` is the current implementation. It wraps
+`ollama.AsyncClient`, applies `CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS`
+via `asyncio.timeout`, and raises `ModelProviderTimeoutError` on timeout.
+An Azure implementation only needs to implement `select_tool` and be
+assigned to the module-level `model_client`; nothing else in the graph,
+MCP layer, or API contracts changes.
+
+The model selects a tool. It never executes it. The application validates
+the tool call and, for CATIA executor tools, returns it to the .NET
+executor.
 
 ## 10. MCP architecture
 
@@ -620,30 +796,41 @@ Qwen selects a tool, but Qwen never executes it. The application validates the t
 
 The MCP server is the authoritative source for:
 
-- Tool names
+- Executor tool names
 - Tool descriptions
 - JSON input schemas
 - Tool-level argument validation
 - Tool discovery
 
-The MCP server does not call CATIA in the current Option 1 architecture. It prepares typed action data for the external WPF and C# executor.
+The MCP server does not call CATIA. It prepares typed action data for
+the external WPF and C# executor.
 
-### Currently implemented tools
+### Currently published MCP tools
 
 ```text
-open_cad_document       Opens a CATPart, CATProduct, or CATDrawing by absolute path.
-get_active_document     Requests the active CATIA document from the executor.
-close_cad_document      Closes the active, a named, or all open documents.
-create_cad_document     Creates a new, unsaved CATPart, CATProduct, or
-                        CATDrawing document. Takes no file path; saving is
-                        a separate action.
-request_clarification   Asks the user for a missing detail (for example, which
-                        document to close). Handled entirely inside the Python
-                        Agent workflow and is never sent to the C# executor.
-route_to_general_chat   Signals that the message is not a CATIA action. Handled
-                        entirely inside the Python Agent workflow. The caller
-                        must reroute the original message to a separate
-                        general-purpose chat model; Python does not answer it.
+open_cad_document       Prepare opening a CATPart, CATProduct, or CATDrawing
+                        by absolute Windows path.
+get_active_document     Prepare a request to retrieve the currently active
+                        CATIA document from the executor.
+close_cad_document      Prepare closing the active, a named, or all open
+                        documents. targetMode is required.
+create_cad_document     Prepare creating a new, unsaved CATPart, CATProduct,
+                        or CATDrawing document. No file path; saving is a
+                        separate action.
+```
+
+### Orchestrator-only tools (not on MCP)
+
+These four tools are planning control signals defined in
+`catia_agent/planner.py`. They are added to the tool list handed to the
+model at plan time but are never published by the MCP server:
+
+```text
+route_to_general_chat            Route the message to a general chat model.
+request_clarification            Ask the user for a missing detail.
+report_unsupported_catia_action  Report a CATIA operation with no approved tool.
+complete_request                 During follow-up planning, signal that all
+                                 requested CATIA actions are done.
 ```
 
 ### MCP discovery flow
@@ -658,17 +845,20 @@ FastMCP Client.list_tools()
 MCP tool definitions
     |
     v
-Convert MCP schemas to Ollama function schemas
+Convert MCP schemas to model-provider function schemas
     |
     v
-Qwen native tool selection
+Model native tool selection
 ```
 
 ### Tool caching
 
-The backend caches converted MCP tool definitions for a configurable TTL. An `asyncio.Lock` prevents several concurrent requests from refreshing the cache simultaneously.
-
-The cache is only a performance optimization. The MCP server remains the source of truth.
+The backend caches converted MCP tool definitions for
+`CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS`. An `asyncio.Lock` prevents
+concurrent requests from refreshing the cache simultaneously. The cache
+is only a performance optimization; the MCP server remains the source of
+truth. Operators can force a refresh via `GET /api/v1/tools?refresh=true`
+or `POST /api/v1/tools/cache/clear` (admin key required in production).
 
 ## 11. CATIA runtime context
 
@@ -679,9 +869,23 @@ isRunning
 activeDocument
 openDocuments
 selectedObjects
+capturedAt
+contextVersion
 ```
 
-The context helps Qwen interpret commands. It is not authoritative because CATIA state may change between collection and execution. Read operations such as `get_active_document` must still be executed by the .NET CATIA layer when the user asks for current information.
+`CatiaContext` (see `catia_agent/models.py`) enforces the invariants:
+
+- When `isRunning` is `false`, `activeDocument`, `openDocuments`, and
+  `selectedObjects` must all be empty.
+- When `activeDocument` is set and `openDocuments` is non-empty, the
+  active document must appear in `openDocuments`.
+- `openDocuments` and `selectedObjects` are bounded (500 and 1000
+  entries respectively) to prevent oversized planning prompts.
+
+The context helps the model interpret commands. It is not authoritative
+because CATIA state may change between collection and execution. Read
+operations such as `get_active_document` must still be executed by the
+.NET CATIA layer when the user asks for current information.
 
 ## 12. Validation layers
 
@@ -691,10 +895,10 @@ Every action passes through several independent checks:
 MCP schema
     |
     v
-Qwen tool selection
+Model tool selection
     |
     v
-Pydantic action model
+Pydantic action model (executor or orchestrator)
     |
     v
 Python deterministic policy
@@ -709,60 +913,93 @@ C# deterministic validation
 CATIA COM
 ```
 
-This layered approach is intentional. A model-selected tool is not trusted merely because it has a valid name.
+This layered approach is intentional. A model-selected tool is not
+trusted merely because it has a valid name.
 
 Examples of deterministic Python validation:
 
-- Absolute Windows path required
-- Approved CATIA extension required
-- Exact typed action model required
-- Unknown MCP tools rejected until explicitly integrated
-- Returned `actionId` must match the pending action
-- Duplicate-action guard: an action whose name and arguments exactly
-  match one already completed in the current run is intercepted before
-  dispatch and finalizes the run (see Section 8.2)
-- Parallel tool calls fall back to a single primary tool: a real CATIA
-  action is preferred over the `route_to_general_chat` and
-  `request_clarification` meta-tools (see Section 8.2)
+- Absolute Windows path required for document operations.
+- Approved CATIA extension required (`.catpart`, `.catproduct`,
+  `.catdrawing`).
+- Exact typed action model required for each tool.
+- Unknown MCP tools rejected (the planner raises if MCP publishes a tool
+  outside `APPROVED_CATIA_TOOL_NAMES`).
+- Returned `actionId` on `POST .../action-results` must match the pending
+  action.
+- `ActionExecutionResultRequest` enforces that `errorCode` and
+  `errorMessage` are present when and only when `success` is `false`.
+- Duplicate-action guard with corrective retry: an action whose name
+  and arguments exactly match one already completed in the current run
+  triggers a targeted retry; if the model still duplicates, the run is
+  finalized as `completed` (Section 8.2).
+- Silent-model recovery: an empty tool-call response on a follow-up
+  planning pass (after ≥1 completed action) is treated as an implicit
+  `complete_request` (Section 8.2).
+- `complete_request` from the model is only accepted after at least one
+  action has already completed in the same run; otherwise it is rejected
+  as a planning error (`MODEL_RETURNED_INVALID_TOOL`).
+- Session and request identifiers are constrained by
+  `^[A-Za-z0-9._:-]+$` and configurable length limits.
 
 ## 13. Logging and observability
 
-Structured JSON logs should include:
+The application emits structured JSON logs when
+`CATIA_AGENT_ENABLE_JSON_LOGS=true` (see `catia_agent/logging_config.py`).
+Every log record automatically carries any of the following that are
+bound in the current async context:
 
 ```text
 requestId
 sessionId
 runId
 actionId
-selectedTool
-status
-durationMs
-errorCode
 ```
 
-Recommended events:
+`X-Request-ID` is echoed on every response for cross-service correlation.
+The middleware only accepts a caller-supplied value when it matches
+`^[A-Za-z0-9._:-]+$` and fits within the configured maximum length;
+otherwise a fresh UUID is used.
+
+Representative events emitted today:
 
 ```text
 application_started
+application_stopped
 http_request_started
-mcp_tool_discovery_started
-mcp_tool_discovery_completed
-mcp_tool_cache_refreshed
-qwen_tool_selection_started
-qwen_tool_selected
-qwen_no_matching_tool
-qwen_multiple_tool_calls
-planner_duplicate_action_detected
-agent_run_planned
-action_result_received
-agent_run_resumed
-agent_run_resume_failed
 http_request_completed
+http_request_timed_out
+http_request_validation_failed
+http_request_unhandled_exception
+mcp_request_failed
+mcp_readiness_failed
+model_tool_selection_started
+model_tool_selected
+model_returned_no_decision
+model_returned_multiple_decisions
+model_tool_call_format_invalid
+model_selected_unknown_tool
+model_tool_arguments_invalid
+model_request_timed_out
+model_provider_failed
+ollama_request_failed
+ollama_readiness_timed_out
+ollama_readiness_failed
+ollama_model_unavailable
+mcp_approved_tools_missing
+planner_duplicate_action_detected
+planner_duplicate_retry_recovered
+planner_duplicate_retry_failed
+planner_no_decision_treated_as_complete
+action_result_received
+agent_run_planned
+agent_run_resumed
 ```
 
-Do not log full prompts, model reasoning, CAD contents, or sensitive file paths at normal information level.
-
-FastAPI returns `X-Request-ID` so the .NET client and Python logs can correlate the same request.
+Sensitive field names (`authorization`, `apiKey`, `adminApiKey`,
+`accessToken`, `refreshToken`, `password`, `secret`) are redacted before
+being serialized to log records. Do not log full prompts, model
+reasoning, CAD contents, or absolute file paths at normal information
+level.
 
 ## 14. Starting the services
 
@@ -782,70 +1019,72 @@ python run_api.py
 
 Ollama normally runs as a native Windows background application.
 
-Before enabling Agent mode, verify:
+Before exercising the Agent, verify:
 
 ```text
 GET http://127.0.0.1:8000/health
 GET http://127.0.0.1:8000/ready
-GET http://127.0.0.1:8000/api/tools
+GET http://127.0.0.1:8000/api/v1/tools
 ```
 
-Use Postman for manual API testing. Keep Swagger current at `/docs` and OpenAPI current at `/openapi.json`.
+Use Postman for manual API testing. Swagger is at `/docs` and OpenAPI at
+`/openapi.json` when `enable_api_docs` is enabled.
 
 ## 15. Adding a new CATIA tool
 
-Use the following sequence for every new tool.
+Use the following sequence for every new executor tool.
 
 ### Step 1: Define the MCP tool
 
-Add a typed function to `catia_mcp/server.py`:
+Add a typed function to `catia_mcp/server.py`, following the pattern in
+that file (typed parameters, docstring, and
+`create_executor_action(...)` for the return payload):
 
 ```python
 @mcp.tool
-def list_open_documents() -> dict[str, object]:
+def list_open_documents() -> dict[str, Any]:
     """Prepare a request to list all open CATIA documents."""
 
-    return {
-        "status": "action_prepared",
-        "action": "list_open_documents",
-        "arguments": {},
-        "executor": "wpf_csharp",
-        "executed": False,
-    }
+    return create_executor_action(
+        action="list_open_documents",
+        arguments={},
+    )
 ```
 
-The function name becomes the tool name. The docstring becomes part of the description. Typed parameters generate the input schema.
+The function name becomes the tool name. The docstring becomes part of
+the description. Typed parameters generate the input schema.
 
 ### Step 2: Add the Pydantic action model
 
 In `catia_agent/models.py`:
 
 ```python
-class ListOpenDocumentsArguments(BaseModel):
+class ListOpenDocumentsArguments(InternalModel):
     pass
 
 
-class ListOpenDocumentsAction(BaseModel):
+class ListOpenDocumentsAction(InternalModel):
     action: Literal["list_open_documents"]
     arguments: ListOpenDocumentsArguments
 ```
 
 Add the new action to the `CatiaAction` union.
 
-### Step 3: Add explicit approval mapping
+### Step 3: Extend the approved-tool set and dispatcher
 
-In `create_typed_action()` inside `planner.py`:
+In `catia_agent/planner.py`:
 
-```python
-if tool_name == "list_open_documents":
-    return ListOpenDocumentsAction.model_validate(raw_action)
-```
+- Add `"list_open_documents"` to `APPROVED_CATIA_TOOL_NAMES`.
+- Add a branch in `create_typed_action` that validates and returns
+  `ListOpenDocumentsAction`.
+- Add the new action type to the `isinstance(...)` check at the bottom
+  of `plan_catia_action` so it produces `ActionRequiredResult`.
 
-Do not automatically approve every tool discovered from MCP.
+MCP discovery does not automatically approve a tool for execution.
 
 ### Step 4: Add deterministic policy checks
 
-For tools with arguments, validate:
+For tools with arguments, validate at least:
 
 - Required identifiers
 - Allowed units
@@ -857,23 +1096,19 @@ For tools with arguments, validate:
 
 ### Step 5: Add completion-message handling
 
-In the LangGraph completion node, translate the external result into a concise user-facing response.
+In `_build_action_success_message` inside `catia_agent/graph.py`,
+translate the external result into a concise user-facing sentence.
 
 ### Step 6: Restart MCP and refresh tools
 
 ```http
-POST /api/tools/cache/clear
+POST /api/v1/tools/cache/clear
+GET  /api/v1/tools?refresh=true
 ```
 
-Then verify:
+### Step 7: Test
 
-```http
-GET /api/tools?refresh=true
-```
-
-### Step 7: Test in Postman
-
-Test:
+Add unit tests under `tests/` covering:
 
 - Supported natural-language variants
 - Unsupported variants
@@ -908,7 +1143,8 @@ hide_component
 show_component
 ```
 
-Add modifying and persistent operations only after approvals are implemented:
+Add modifying and persistent operations only after approvals are
+implemented:
 
 ```text
 move_component
@@ -923,59 +1159,91 @@ close_without_saving
 ### When to split into a supervisor and specialized sub-agents
 
 Do not confuse this with the sequential multi-action loop in Section 8.2.
-That loop still uses one planner, one system prompt, and one tool list; it
-just calls the planner more than once for a single compound message. A
-supervisor and sub-agent split is a different thing: multiple *distinct*
-planners, each with its own system prompt and its own subset of tools.
+That loop still uses one planner, one system prompt, and one tool list;
+it just calls the planner more than once for a single compound message.
+A supervisor and sub-agent split is a different thing: multiple
+*distinct* planners, each with its own system prompt and its own subset
+of tools.
 
-The current design intentionally uses a single planner: one system prompt
-and one tool list, with all tool-specific behavior living in each MCP
-tool's own docstring rather than the shared prompt (see `catia_mcp/server.py`).
-This keeps the shared prompt's size independent of tool count and resolves
-chat-vs-agentic routing plus tool selection in a single Ollama call.
+The current design intentionally uses a single planner: one system
+prompt and one tool list, with all tool-specific behavior living in each
+MCP tool's own docstring rather than the shared prompt (see
+`catia_mcp/server.py`). This keeps the shared prompt's size independent
+of tool count and resolves chat-vs-agentic routing plus tool selection in
+a single model call.
 
 Do not split this into a supervisor plus specialized sub-agents just
-because the tool count grows. At the current tool count, every tool belongs
-to one domain (CATIA document lifecycle), so a supervisor would have
-nothing meaningful to route between, and it would add a second sequential
-model call to every agentic message for no behavioral benefit.
+because the tool count grows. At the current tool count, every tool
+belongs to one domain (CATIA document lifecycle), so a supervisor would
+have nothing meaningful to route between, and it would add a second
+sequential model call to every agentic message for no behavioral
+benefit.
 
 The real trigger is the first modifying or persistent operation above
-(`move_component`, `change_parameter`, `save_document`, and similar). Those
-need a fundamentally different policy than today's read and lifecycle
-tools: an approval or confirmation gate, preview, and audit logging. That
-is the point to introduce a second planner (for example,
+(`move_component`, `change_parameter`, `save_document`, and similar).
+Those need a fundamentally different policy than today's read and
+lifecycle tools: an approval or confirmation gate, preview, and audit
+logging. That is the point to introduce a second planner (for example,
 `modifying_operations_planner`) with its own system prompt and an
 interrupt-based approval step, behind a thin supervisor that routes based
-on risk category. Split then because of differing safety requirements, not
-because of prompt length or tool count alone.
+on risk category. Split then because of differing safety requirements,
+not because of prompt length or tool count alone.
 
 ## 17. Production considerations
 
-Before production use, address:
+The Python backend already ships with several production-oriented
+guardrails:
 
-- Persistent LangGraph checkpoint storage
-- Authentication between .NET and FastAPI
-- Authentication or controlled local transport for MCP
-- Tool-level authorization
-- Approved-directory allowlists
-- Human approval for modifying or persistent actions
-- Request-size limits
-- Rate limits and concurrency limits
-- Audit retention
-- Model and tool evaluation dataset
-- Versioned API contracts
-- Recovery after application restart
-- Installer and service lifecycle management
-- Corporate data and model-governance requirements
+- Environment-policy enforcement in `Settings.validate_environment_policy`
+  (docs disabled, technical detail hidden, admin key required for the
+  cache-clear endpoint when enabled).
+- Stable error contract with correlation IDs on every response.
+- Per-request timeouts, body-size limits, identifier validation, and a
+  provider-neutral model-client abstraction.
+- Structured JSON logging with automatic redaction of sensitive field
+  names.
+- Deterministic validation layers between the model and the C# executor.
+
+The following items must still be addressed before broad production
+rollout:
+
+- **Persistent LangGraph checkpoint storage.** The current
+  `InMemorySaver` loses all pending runs, conversation history, and the
+  `runId -> sessionId` map on restart. This is the largest remaining gap.
+- **Persistent `runId -> sessionId` mapping** consistent with the chosen
+  checkpoint store.
+- **Authentication between .NET and FastAPI** on the Agent endpoints
+  (the admin key today only protects the cache-clear endpoint).
+- **Authentication or a controlled local transport for MCP.**
+- **Tool-level authorization** for modifying operations.
+- **Approved-directory allowlists** enforced in Python in addition to C#.
+- **Human approval for modifying or persistent actions** (see Section 16).
+- **Rate limits and concurrency limits** at the ingress layer.
+- **Audit retention** for `completedActions` and terminal responses.
+- **A model and tool evaluation dataset** exercised on every model or
+  prompt change.
+- **Versioned API contracts** (the current prefix is `/api/v1`; add
+  `/api/v2` when a breaking change is required rather than mutating v1).
+- **Recovery-after-restart procedures** aligned with the persistent
+  checkpoint store.
+- **Installer and service lifecycle management** for MCP, FastAPI, and
+  the chosen model provider.
+- **Corporate data and model-governance sign-off**, especially before
+  switching to a cloud-hosted model.
 
 ## 18. Design rules
 
-1. Qwen selects tools but never executes CATIA.
-2. MCP advertises tools but does not automatically authorize C# execution.
+1. The model selects tools but never executes CATIA.
+2. MCP advertises tools but does not automatically authorize execution.
 3. Python validates every selected action.
 4. C# independently validates and allowlists every action.
 5. CATIA COM logic remains deterministic and testable.
-6. Chat mode and Agent mode remain explicitly selected by the user.
-7. The model must not generate Python, C#, VBA, or PowerShell for immediate execution.
-8. New tools are disabled until all Python and C# integration steps are complete.
+6. The model chooses chat vs agentic routing by calling exactly one
+   orchestrator or executor tool; the client never picks a mode.
+7. The model must not generate Python, C#, VBA, or PowerShell for
+   immediate execution.
+8. New tools are disabled until all Python and C# integration steps are
+   complete.
+9. The planner is coupled to `ToolCallingModelClient`, not to any
+   specific provider. Provider changes must not leak into the graph, the
+   MCP layer, or the API contracts.

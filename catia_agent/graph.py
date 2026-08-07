@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -6,14 +9,22 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from catia_agent.config import settings
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import (
+    action_id_context,
+    get_logger,
+    run_id_context,
+)
 from catia_agent.models import (
     ActionExecutionResultRequest,
     ActionRequiredResult,
+    CatiaAction,
     CatiaContext,
-    InvalidRequestResult,
-    PlannerResult,
     ClarificationRequiredResult,
+    InvalidRequestResult,
+    NonAgenticResult,
+    PlannerResult,
+    PlanningErrorResult,
+    RequestCompletedResult,
     UnsupportedRequestResult,
 )
 from catia_agent.planner import plan_catia_action
@@ -22,430 +33,725 @@ from catia_agent.planner import plan_catia_action
 logger = get_logger(__name__)
 
 
-# ---------------------------------------------------------
-# Errors
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
+# Exceptions
+# -------------------------------------------------------------------------
 
 class AgentRunStateConflictError(ValueError):
-    """Raised when an Agent run request does not match the current graph state."""
+    """
+    Raised when a run request does not match the current graph state.
+    """
 
 
-# ---------------------------------------------------------
-# LangGraph state
-# ---------------------------------------------------------
+class AgentRunNotFoundError(KeyError):
+    """
+    Raised when a run identifier is unknown to this process.
+    """
+
+
+# -------------------------------------------------------------------------
+# Graph state
+# -------------------------------------------------------------------------
 
 class CatiaAgentState(TypedDict, total=False):
     session_id: str
     run_id: str
     action_id: str
-    user_message: str
 
-    catia_context: CatiaContext
+    user_message: str
+    catia_context: CatiaContext | None
 
     messages: list[dict[str, str]]
+    sequence_progress: list[dict[str, str]]
 
     planner_result: PlannerResult
+    pending_action: CatiaAction
+    action_result: ActionExecutionResultRequest
 
-    pending_action: dict[str, Any]
-    action_result: dict[str, Any]
-
-    # Multi-action sequences within a single run (see plan_action_node).
     completed_actions: list[dict[str, Any]]
-    sequence_progress: list[dict[str, str]]
-    sequence_capped: bool
-
     final_response: dict[str, Any]
 
 
-# ---------------------------------------------------------
-# Conversation history helper
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
+# Process-local run lookup
+# -------------------------------------------------------------------------
+
+_run_sessions: dict[str, str] = {}
+
+
+def get_session_id_for_run(
+    run_id: str,
+) -> str | None:
+    return _run_sessions.get(run_id)
+
+
+def _thread_config(
+    session_id: str,
+) -> dict[str, Any]:
+    return {
+        "configurable": {
+            "thread_id": session_id,
+        }
+    }
+
+
+# -------------------------------------------------------------------------
+# Response helpers
+# -------------------------------------------------------------------------
+
+def _new_identifier() -> str:
+    return str(uuid4())
+
+
+def _serialize_completed_actions(
+    completed_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        dict(action)
+        for action in completed_actions
+    ]
+
+
+def _completed_actions_or_none(
+    completed_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    if not completed_actions:
+        return None
+
+    return _serialize_completed_actions(
+        completed_actions
+    )
+
+
+def _join_completed_messages(
+    completed_actions: list[dict[str, Any]],
+) -> str:
+    messages = [
+        str(action.get("message", "")).strip()
+        for action in completed_actions
+        if str(action.get("message", "")).strip()
+    ]
+
+    if not messages:
+        return (
+            "The requested CATIA actions completed "
+            "successfully."
+        )
+
+    return " ".join(messages)
+
 
 def _record_conversation_turn(
     state: CatiaAgentState,
     assistant_message: str,
 ) -> list[dict[str, str]]:
-    """Append this turn so the next planner call sees it as history."""
-
-    history = list(state.get("messages", []))
-
-    history.append(
-        {"role": "user", "content": state["user_message"]}
-    )
-    history.append(
-        {"role": "assistant", "content": assistant_message}
+    messages = list(
+        state.get("messages", [])
     )
 
-    return history
-
-
-def _summarize_completed_actions(
-    completed_actions: list[dict[str, Any]],
-) -> str:
-    """Join the per-action messages completed so far in this run."""
-
-    return " ".join(
-        entry["message"] for entry in completed_actions
+    messages.append(
+        {
+            "role": "user",
+            "content": state["user_message"],
+        }
     )
+
+    messages.append(
+        {
+            "role": "assistant",
+            "content": assistant_message,
+        }
+    )
+
+    maximum_messages = (
+        settings.max_conversation_history_messages
+    )
+
+    return messages[-maximum_messages:]
 
 
 def _build_action_success_message(
     action_name: str,
     result_data: dict[str, Any] | None,
 ) -> str:
+    data = result_data or {}
+
     if action_name == "open_cad_document":
-        document_name = (
-            result_data.get("documentName") if result_data else None
+        document_name = data.get(
+            "documentName"
         )
 
         if document_name:
-            return f"{document_name} was opened successfully."
+            return (
+                f"{document_name} was opened successfully."
+            )
 
-        return "The CATIA document was opened successfully."
+        return (
+            "The CATIA document was opened successfully."
+        )
 
     if action_name == "get_active_document":
-        document_name = (
-            result_data.get("documentName") if result_data else None
+        document_name = data.get(
+            "documentName"
         )
 
         if document_name:
-            return f"The active CATIA document is {document_name}."
+            return (
+                f"The active CATIA document is "
+                f"{document_name}."
+            )
 
         return (
-            "CATIA does not currently have an active document."
-        )
-
-    if action_name == "close_cad_document":
-        closed_documents = (
-            (result_data.get("closedDocuments") or [])
-            if result_data
-            else []
-        )
-
-        closed_count = len(closed_documents)
-
-        if closed_count == 0:
-            return "No CATIA documents needed to be closed."
-
-        if closed_count == 1:
-            return f"{closed_documents[0]} was closed successfully."
-
-        return (
-            f"{closed_count} CATIA documents were closed "
-            "successfully."
+            "CATIA does not currently have an active "
+            "document."
         )
 
     if action_name == "create_cad_document":
-        document_name = (
-            result_data.get("documentName") if result_data else None
+        document_name = data.get(
+            "documentName"
+        )
+
+        document_type = data.get(
+            "documentType"
         )
 
         if document_name:
-            return f"{document_name} was created successfully."
+            return (
+                f"{document_name} was created successfully."
+            )
 
-        return "A new CATIA document was created successfully."
+        if document_type:
+            return (
+                f"A new {document_type} document was "
+                "created successfully."
+            )
 
-    return "The CATIA action completed successfully."
+        return (
+            "The CATIA document was created successfully."
+        )
+
+    if action_name == "close_cad_document":
+        closed_documents = data.get(
+            "closedDocuments"
+        )
+
+        if isinstance(
+            closed_documents,
+            list,
+        ) and closed_documents:
+            names = ", ".join(
+                str(name)
+                for name in closed_documents
+            )
+
+            return (
+                f"{names} closed successfully."
+            )
+
+        document_name = data.get(
+            "documentName"
+        )
+
+        if document_name:
+            return (
+                f"{document_name} closed successfully."
+            )
+
+        return (
+            "The requested CATIA document was closed "
+            "successfully."
+        )
+
+    return (
+        "The CATIA action completed successfully."
+    )
 
 
-# ---------------------------------------------------------
+def _build_action_failure_message(
+    action_name: str,
+    result: ActionExecutionResultRequest,
+) -> str:
+    error_message = (
+        result.errorMessage
+        or "The external CATIA executor reported a failure."
+    )
+
+    return (
+        f"The CATIA action '{action_name}' failed. "
+        f"{error_message}"
+    )
+
+
+# -------------------------------------------------------------------------
 # Graph nodes
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 
 async def plan_action_node(
     state: CatiaAgentState,
-) -> dict:
-    user_message = state.get(
-        "user_message",
-        "",
-    ).strip()
+) -> dict[str, Any]:
+    completed_actions = list(
+        state.get("completed_actions", [])
+    )
 
-    if not user_message:
+    if (
+        len(completed_actions)
+        >= settings.max_actions_per_run
+    ):
         return {
-            "planner_result": InvalidRequestResult(
-                status="invalid_request",
-                message="The CATIA command cannot be empty.",
+            "planner_result": (
+                UnsupportedRequestResult(
+                    status="unsupported_request",
+                    message=(
+                        "The maximum number of CATIA actions "
+                        "allowed for one request was reached."
+                    ),
+                    requestedCapability=None,
+                    reason="action_limit_reached",
+                )
             )
         }
 
-    completed_actions = state.get("completed_actions", [])
-
-    if len(completed_actions) >= settings.max_actions_per_run:
-        return {
-            "planner_result": UnsupportedRequestResult(
-                status="unsupported_request",
-                message=(
-                    "The maximum number of actions for a single "
-                    "request was reached."
-                ),
-            ),
-            "sequence_capped": True,
-        }
-
-    history = (
-        state.get("messages", [])
-        + state.get("sequence_progress", [])
-    )
+    conversation_history = [
+        *state.get("messages", []),
+        *state.get(
+            "sequence_progress",
+            [],
+        ),
+    ]
 
     planner_result = await plan_catia_action(
-        user_command=user_message,
-        catia_context=state.get("catia_context"),
-        conversation_history=history,
+        user_command=state["user_message"],
+        catia_context=state.get(
+            "catia_context"
+        ),
+        conversation_history=conversation_history,
         completed_actions=completed_actions,
     )
 
-    if isinstance(planner_result, ActionRequiredResult):
-        proposed_action = planner_result.action.model_dump()
+    duplicate = _find_duplicate_completed_action(
+        planner_result,
+        completed_actions,
+    )
 
-        for previous in completed_actions:
-            if (
-                previous["action"] == proposed_action["action"]
-                and previous.get("arguments")
-                == proposed_action.get("arguments")
-            ):
-                # Qwen picked an action already completed with the same
-                # arguments; treat as sequence-complete instead of looping.
-                logger.warning(
-                    "planner_duplicate_action_detected",
-                    extra={
-                        "proposedAction": proposed_action["action"],
-                        "completedActionCount": len(completed_actions),
-                    },
-                )
+    if duplicate is not None:
+        logger.warning(
+            "planner_duplicate_action_detected",
+            extra={
+                "runId": state["run_id"],
+                "selectedTool": duplicate["action"],
+            },
+        )
 
-                planner_result = UnsupportedRequestResult(
-                    status="unsupported_request",
-                    message=(
-                        "No further CATIA actions are required "
-                        "for this request."
+        retry_hint = _build_duplicate_retry_hint(
+            duplicate
+        )
+
+        planner_result = await plan_catia_action(
+            user_command=state["user_message"],
+            catia_context=state.get(
+                "catia_context"
+            ),
+            conversation_history=conversation_history,
+            completed_actions=completed_actions,
+            retry_hint=retry_hint,
+        )
+
+        duplicate = _find_duplicate_completed_action(
+            planner_result,
+            completed_actions,
+        )
+
+        if duplicate is not None:
+            logger.warning(
+                "planner_duplicate_retry_failed",
+                extra={
+                    "runId": state["run_id"],
+                    "selectedTool": duplicate["action"],
+                },
+            )
+
+            planner_result = RequestCompletedResult(
+                status="request_completed"
+            )
+
+        else:
+            logger.info(
+                "planner_duplicate_retry_recovered",
+                extra={
+                    "runId": state["run_id"],
+                    "selectedTool": (
+                        planner_result.action.action
+                        if isinstance(
+                            planner_result,
+                            ActionRequiredResult,
+                        )
+                        else None
                     ),
-                )
-                break
+                },
+            )
 
     return {
         "planner_result": planner_result,
     }
 
 
+def _find_duplicate_completed_action(
+    planner_result: PlannerResult,
+    completed_actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(
+        planner_result,
+        ActionRequiredResult,
+    ):
+        return None
+
+    proposed = planner_result.action.model_dump(
+        mode="json"
+    )
+
+    for entry in completed_actions:
+        if (
+            entry.get("action") == proposed["action"]
+            and entry.get("arguments", {})
+            == proposed["arguments"]
+        ):
+            return {
+                "action": proposed["action"],
+                "arguments": proposed["arguments"],
+            }
+
+    return None
+
+
+def _build_duplicate_retry_hint(
+    duplicate: dict[str, Any],
+) -> str:
+    arguments_json = json.dumps(
+        duplicate["arguments"],
+        sort_keys=True,
+    )
+
+    return (
+        "Duplicate detected in this planning step.\n\n"
+        "You just selected "
+        f"{duplicate['action']} with arguments {arguments_json}, "
+        "which is IDENTICAL to an action already listed in the "
+        "goal-delta analysis above as completed.\n\n"
+        "Redo the goal-delta analysis:\n"
+        "1. Look at the original user request shown above.\n"
+        "2. Look at the actions already completed.\n"
+        "3. Identify what CATIA operation is still not done.\n\n"
+        "Select the SINGLE NEXT remaining CATIA action. If every "
+        "CATIA operation in the original request is done, call "
+        "complete_request. Do not repeat the action shown above."
+    )
+
+
 def prepare_action_node(
     state: CatiaAgentState,
-) -> dict:
+) -> dict[str, Any]:
     planner_result = state["planner_result"]
 
     if not isinstance(
         planner_result,
         ActionRequiredResult,
     ):
-        raise ValueError(
-            "An action could not be prepared because the "
-            "planner did not return action_required."
+        raise AgentRunStateConflictError(
+            "The graph attempted to prepare an action "
+            "without an action-required planner result."
         )
 
-    action_id = str(uuid4())
-
-    pending_action = {
-        "status": "action_required",
-        "sessionId": state["session_id"],
-        "runId": state["run_id"],
-        "actionId": action_id,
-        "action": planner_result.action.model_dump(),
-    }
+    action_id = _new_identifier()
 
     return {
         "action_id": action_id,
-        "pending_action": pending_action,
+        "pending_action": planner_result.action,
+        "action_result": None,
     }
 
 
 def await_action_result_node(
     state: CatiaAgentState,
-) -> dict:
-    """
-    Pause the graph and return the pending action to the
-    external executor.
+) -> dict[str, Any]:
+    pending_action = state["pending_action"]
 
-    Later, WPF will execute the C# CATIA COM method and send
-    the result to the action-results endpoint.
-    """
-
-    resumed_value = interrupt(
-        state["pending_action"]
+    resume_payload = interrupt(
+        {
+            "status": "action_required",
+            "sessionId": state["session_id"],
+            "runId": state["run_id"],
+            "actionId": state["action_id"],
+            "action": pending_action.model_dump(
+                mode="json"
+            ),
+        }
     )
 
-    action_result = (
+    result = (
         ActionExecutionResultRequest.model_validate(
-            resumed_value
+            resume_payload
         )
     )
-
-    if action_result.actionId != state["action_id"]:
-        raise AgentRunStateConflictError(
-            "The returned actionId does not match the "
-            "pending CATIA action."
-        )
 
     return {
-        "action_result": action_result.model_dump(),
+        "action_result": result,
     }
 
 
 def record_action_result_node(
     state: CatiaAgentState,
-) -> dict:
-    """
-    Record the result of one executed action.
-
-    On failure, the sequence stops immediately and a final response
-    is built from everything completed so far plus the failure. On
-    success, the result is recorded and the graph loops back to
-    plan_action to check whether the original request has more to do.
-    """
-
-    action_result = state["action_result"]
+) -> dict[str, Any]:
+    result = state["action_result"]
     pending_action = state["pending_action"]
-    completed_actions = list(state.get("completed_actions", []))
 
-    if not action_result["success"]:
-        failure_message = (
-            action_result.get("errorMessage")
-            or "The CATIA action failed."
+    expected_action_id = state["action_id"]
+
+    if result.actionId != expected_action_id:
+        raise AgentRunStateConflictError(
+            "The submitted actionId does not match "
+            "the action currently awaiting a result."
         )
 
-        progress = _summarize_completed_actions(completed_actions)
-        message = (
-            f"{progress} {failure_message}"
-            if progress
-            else failure_message
+    completed_actions = list(
+        state.get("completed_actions", [])
+    )
+
+    action_name = pending_action.action
+    action_arguments = (
+        pending_action.arguments.model_dump(
+            mode="json"
+        )
+    )
+
+    if not result.success:
+        failure_message = (
+            _build_action_failure_message(
+                action_name,
+                result,
+            )
         )
 
         final_response = {
             "status": "execution_failed",
             "sessionId": state["session_id"],
             "runId": state["run_id"],
-            "actionId": state["action_id"],
-            "message": message,
-            "errorCode": action_result.get("errorCode"),
+            "actionId": expected_action_id,
+            "message": failure_message,
+            "errorCode": result.errorCode,
+            "errorMessage": result.errorMessage,
+            "completedActions": (
+                _serialize_completed_actions(
+                    completed_actions
+                )
+            ),
         }
-
-        if completed_actions:
-            final_response["completedActions"] = completed_actions
 
         return {
             "final_response": final_response,
-            "messages": _record_conversation_turn(state, message),
+            "messages": _record_conversation_turn(
+                state,
+                failure_message,
+            ),
         }
 
-    action_name = pending_action["action"]["action"]
-    action_arguments = pending_action["action"].get("arguments", {})
-    result_data = action_result.get("data")
-    message = _build_action_success_message(
-        action_name, result_data
+    success_message = (
+        _build_action_success_message(
+            action_name,
+            result.data,
+        )
     )
+
+    completed_action = {
+        "action": action_name,
+        "actionId": expected_action_id,
+        "arguments": action_arguments,
+        "message": success_message,
+        "data": result.data,
+    }
 
     completed_actions.append(
-        {
-            "action": action_name,
-            "actionId": state["action_id"],
-            "arguments": action_arguments,
-            "message": message,
-            "data": result_data,
-        }
+        completed_action
     )
 
-    sequence_progress = list(state.get("sequence_progress", []))
+    sequence_progress = list(
+        state.get("sequence_progress", [])
+    )
+
     sequence_progress.append(
-        {"role": "assistant", "content": message}
+        {
+            "role": "assistant",
+            "content": success_message,
+        }
     )
 
     return {
         "completed_actions": completed_actions,
         "sequence_progress": sequence_progress,
+        "planner_result": None,
+        "pending_action": None,
+        "action_result": None,
+        "final_response": None,
     }
 
 
 def prepare_sequence_completed_response_node(
     state: CatiaAgentState,
-) -> dict:
-    """
-    Finalize a run once the planner determines nothing from the
-    original request remains to be done.
-    """
+) -> dict[str, Any]:
+    completed_actions = list(
+        state.get("completed_actions", [])
+    )
 
-    completed_actions = state.get("completed_actions", [])
-    message = _summarize_completed_actions(completed_actions)
-    last_action = completed_actions[-1] if completed_actions else None
+    message = _join_completed_messages(
+        completed_actions
+    )
 
-    final_response = {
+    last_action_id = (
+        completed_actions[-1]["actionId"]
+        if completed_actions
+        else None
+    )
+
+    last_data = (
+        completed_actions[-1].get("data")
+        if completed_actions
+        else None
+    )
+
+    response = {
         "status": "completed",
         "sessionId": state["session_id"],
         "runId": state["run_id"],
-        "actionId": (
-            last_action["actionId"]
-            if last_action
-            else state.get("action_id")
-        ),
+        "actionId": last_action_id,
         "message": message,
-        "data": last_action["data"] if last_action else None,
-        "completedActions": completed_actions,
+        "data": last_data,
+        "completedActions": (
+            _serialize_completed_actions(
+                completed_actions
+            )
+        ),
     }
 
     return {
-        "final_response": final_response,
-        "messages": _record_conversation_turn(state, message),
+        "final_response": response,
+        "messages": _record_conversation_turn(
+            state,
+            message,
+        ),
+        "sequence_progress": [],
     }
 
 
 def prepare_terminal_response_node(
     state: CatiaAgentState,
-) -> dict:
-    """
-    Prepare responses for unsupported or invalid requests
-    that do not need external execution.
-    """
+) -> dict[str, Any]:
     planner_result = state["planner_result"]
-    completed_actions = state.get("completed_actions", [])
 
-    progress = _summarize_completed_actions(completed_actions)
-    message = (
-        f"{progress} {planner_result.message}"
-        if progress
-        else planner_result.message
+    completed_actions = list(
+        state.get("completed_actions", [])
     )
 
-    final_response = {
-        "status": planner_result.status,
+    base_response: dict[str, Any] = {
         "sessionId": state["session_id"],
         "runId": state["run_id"],
-        "message": message,
     }
-
-    if completed_actions:
-        final_response["completedActions"] = completed_actions
 
     if isinstance(
         planner_result,
+        NonAgenticResult,
+    ):
+        response = {
+            **base_response,
+            **planner_result.model_dump(
+                mode="json"
+            ),
+        }
+
+    elif isinstance(
+        planner_result,
         ClarificationRequiredResult,
     ):
-        final_response["missingField"] = (
-            planner_result.missingField
+        response = {
+            **base_response,
+            **planner_result.model_dump(
+                mode="json"
+            ),
+        }
+
+    elif isinstance(
+        planner_result,
+        UnsupportedRequestResult,
+    ):
+        response = {
+            **base_response,
+            **planner_result.model_dump(
+                mode="json"
+            ),
+        }
+
+    elif isinstance(
+        planner_result,
+        InvalidRequestResult,
+    ):
+        response = {
+            **base_response,
+            **planner_result.model_dump(
+                mode="json"
+            ),
+        }
+
+    elif isinstance(
+        planner_result,
+        PlanningErrorResult,
+    ):
+        response = {
+            **base_response,
+            **planner_result.model_dump(
+                mode="json"
+            ),
+        }
+
+    else:
+        raise AgentRunStateConflictError(
+            "The graph reached terminal-response "
+            "preparation with an unsupported planner result."
         )
 
+    completed_response_actions = (
+        _completed_actions_or_none(
+            completed_actions
+        )
+    )
+
+    if completed_response_actions is not None:
+        response["completedActions"] = (
+            completed_response_actions
+        )
+
+    message = str(
+        response.get(
+            "message",
+            "The Agent run ended.",
+        )
+    )
+
     return {
-        "final_response": final_response,
+        "final_response": response,
         "messages": _record_conversation_turn(
-            state, final_response["message"]
+            state,
+            message,
         ),
+        "sequence_progress": [],
     }
 
 
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 # Conditional routing
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 
 def route_after_planning(
     state: CatiaAgentState,
 ) -> str:
-    planner_result = state["planner_result"] # type: ignore
+    planner_result = state["planner_result"]
 
     if isinstance(
         planner_result,
@@ -453,15 +759,11 @@ def route_after_planning(
     ):
         return "prepare_action"
 
-    if (
-        isinstance(
-            planner_result,
-            UnsupportedRequestResult,
-        )
-        and state.get("completed_actions")
-        and not state.get("sequence_capped")
+    if isinstance(
+        planner_result,
+        RequestCompletedResult,
     ):
-        return "prepare_sequence_completed_response"
+        return "prepare_sequence_completed"
 
     return "prepare_terminal_response"
 
@@ -475,11 +777,13 @@ def route_after_action_result(
     return "continue"
 
 
-# ---------------------------------------------------------
-# Build and compile graph
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
+# Graph construction
+# -------------------------------------------------------------------------
 
-graph_builder = StateGraph(CatiaAgentState)
+graph_builder = StateGraph(
+    CatiaAgentState
+)
 
 graph_builder.add_node(
     "plan_action",
@@ -497,12 +801,12 @@ graph_builder.add_node(
 )
 
 graph_builder.add_node(
-    "prepare_completion",
+    "record_action_result",
     record_action_result_node,
 )
 
 graph_builder.add_node(
-    "prepare_sequence_completed_response",
+    "prepare_sequence_completed",
     prepare_sequence_completed_response_node,
 )
 
@@ -521,10 +825,12 @@ graph_builder.add_conditional_edges(
     route_after_planning,
     {
         "prepare_action": "prepare_action",
-        "prepare_sequence_completed_response":
-            "prepare_sequence_completed_response",
-        "prepare_terminal_response":
-            "prepare_terminal_response",
+        "prepare_sequence_completed": (
+            "prepare_sequence_completed"
+        ),
+        "prepare_terminal_response": (
+            "prepare_terminal_response"
+        ),
     },
 )
 
@@ -535,11 +841,11 @@ graph_builder.add_edge(
 
 graph_builder.add_edge(
     "await_action_result",
-    "prepare_completion",
+    "record_action_result",
 )
 
 graph_builder.add_conditional_edges(
-    "prepare_completion",
+    "record_action_result",
     route_after_action_result,
     {
         "continue": "plan_action",
@@ -548,7 +854,7 @@ graph_builder.add_conditional_edges(
 )
 
 graph_builder.add_edge(
-    "prepare_sequence_completed_response",
+    "prepare_sequence_completed",
     END,
 )
 
@@ -558,10 +864,6 @@ graph_builder.add_edge(
 )
 
 
-# ---------------------------------------------------------
-# In-memory persistence for the POC
-# ---------------------------------------------------------
-
 checkpointer = InMemorySaver()
 
 catia_agent_graph = graph_builder.compile(
@@ -569,130 +871,229 @@ catia_agent_graph = graph_builder.compile(
 )
 
 
-# ---------------------------------------------------------
-# Run-to-session mapping
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
+# State helpers
+# -------------------------------------------------------------------------
 
-# The LangGraph thread is keyed by session, not run, so the
-# action-results endpoint (which only receives a runId) needs this
-# lookup to find the right session thread. Process-local only.
-_run_sessions: dict[str, str] = {}
+def _get_existing_state(
+    session_id: str,
+) -> dict[str, Any]:
+    snapshot = catia_agent_graph.get_state(
+        _thread_config(session_id)
+    )
+
+    if snapshot is None:
+        return {}
+
+    return dict(snapshot.values or {})
 
 
-def get_session_id_for_run(run_id: str) -> str | None:
-    """Return the session that owns this runId, if any."""
+def _is_waiting_for_action_result(
+    state: dict[str, Any],
+) -> bool:
+    return bool(
+        state.get("pending_action")
+        and state.get("action_id")
+        and state.get("final_response") is None
+    )
 
-    return _run_sessions.get(run_id)
+
+def _build_current_response(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    final_response = state.get(
+        "final_response"
+    )
+
+    if final_response is not None:
+        return dict(final_response)
+
+    pending_action = state.get(
+        "pending_action"
+    )
+
+    action_id = state.get(
+        "action_id"
+    )
+
+    if pending_action is not None and action_id:
+        action_payload = (
+            pending_action.model_dump(
+                mode="json"
+            )
+            if hasattr(
+                pending_action,
+                "model_dump",
+            )
+            else pending_action
+        )
+
+        return {
+            "status": "action_required",
+            "sessionId": state["session_id"],
+            "runId": state["run_id"],
+            "actionId": action_id,
+            "action": action_payload,
+        }
+
+    raise AgentRunStateConflictError(
+        "The Agent graph stopped without producing "
+        "a terminal response or pending action."
+    )
 
 
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 # Public entry points
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 
 async def start_catia_agent(
     session_id: str,
     user_message: str,
     catia_context: CatiaContext | None = None,
 ) -> dict[str, Any]:
-
-    config = {
-        "configurable": {
-            "thread_id": session_id,
-        }
-    }
-
-    existing_snapshot = catia_agent_graph.get_state(config) # type: ignore
-
-    if existing_snapshot.values and existing_snapshot.next == (
-        "await_action_result",
-    ):
-        raise AgentRunStateConflictError(
-            "This session already has a pending CATIA action. "
-            "Submit its result before starting a new command."
-        )
-
-    run_id = str(uuid4())
-    _run_sessions[run_id] = session_id
-
-    result = await catia_agent_graph.ainvoke(
-        {
-            "session_id": session_id,
-            "run_id": run_id,
-            "user_message": user_message,
-            "catia_context": catia_context,
-            # Reset per-run queue state; the thread persists across runs
-            # within a session, so stale values from a prior run must
-            # not leak into this one.
-            "completed_actions": [],
-            "sequence_progress": [],
-            "sequence_capped": False,
-            "final_response": None,
-        }, # type: ignore
-        config=config, # type: ignore
+    existing_state = _get_existing_state(
+        session_id
     )
 
-    interrupts = result.get("__interrupt__")
+    if _is_waiting_for_action_result(
+        existing_state
+    ):
+        raise AgentRunStateConflictError(
+            "This session already has an Agent run "
+            "waiting for a CATIA action result."
+        )
 
-    if interrupts:
-        return interrupts[0].value
+    run_id = _new_identifier()
 
-    _run_sessions.pop(run_id, None)
+    _run_sessions[run_id] = session_id
 
-    return result["final_response"]
+    run_token = run_id_context.set(
+        run_id
+    )
+
+    try:
+        initial_state: CatiaAgentState = {
+            "session_id": session_id,
+            "run_id": run_id,
+            "user_message": user_message.strip(),
+            "catia_context": catia_context,
+            "messages": list(
+                existing_state.get(
+                    "messages",
+                    [],
+                )
+            ),
+            "sequence_progress": [],
+            "completed_actions": [],
+            "final_response": None,
+        }
+
+        await catia_agent_graph.ainvoke(
+            initial_state,
+            config=_thread_config(
+                session_id
+            ),
+        )
+
+        current_state = _get_existing_state(
+            session_id
+        )
+
+        return _build_current_response(
+            current_state
+        )
+
+    finally:
+        run_id_context.reset(
+            run_token
+        )
 
 
 async def resume_catia_agent(
     run_id: str,
     action_result: ActionExecutionResultRequest,
 ) -> dict[str, Any]:
-    session_id = _run_sessions.get(run_id)
-
-    if session_id is None:
-        raise KeyError(
-            f"No pending Agent run was found for runId: "
-            f"{run_id}"
-        )
-
-    config = {
-        "configurable": {
-            "thread_id": session_id,
-        }
-    }
-
-    snapshot = catia_agent_graph.get_state(config) # type: ignore
-
-    if not snapshot.values:
-        raise KeyError(
-            f"No pending Agent run was found for runId: "
-            f"{run_id}"
-        )
-
-    if snapshot.values.get("run_id") != run_id:
-        raise AgentRunStateConflictError(
-            "This action result does not match the "
-            "currently pending Agent run for this session."
-        )
-
-    if snapshot.next != (
-        "await_action_result",
-    ):
-        raise AgentRunStateConflictError(
-            "This Agent run is not waiting for an "
-            "action result."
-        )
-
-    result = await catia_agent_graph.ainvoke(
-        Command(
-            resume=action_result.model_dump()
-        ),
-        config=config, # type: ignore
+    session_id = _run_sessions.get(
+        run_id
     )
 
-    if result.get("__interrupt__"):
-        # Another action is queued for this same run; keep the
-        # run_id -> session_id mapping alive for its resume call.
-        return result["__interrupt__"][0].value
+    if session_id is None:
+        raise AgentRunNotFoundError(
+            f"No Agent run was found for runId "
+            f"'{run_id}'."
+        )
 
-    _run_sessions.pop(run_id, None)
+    existing_state = _get_existing_state(
+        session_id
+    )
 
-    return result["final_response"]
+    if existing_state.get(
+        "run_id"
+    ) != run_id:
+        raise AgentRunStateConflictError(
+            "The supplied runId does not match the "
+            "current run for this session."
+        )
+
+    if not _is_waiting_for_action_result(
+        existing_state
+    ):
+        raise AgentRunStateConflictError(
+            "The Agent run is not currently waiting "
+            "for a CATIA action result."
+        )
+
+    expected_action_id = existing_state.get(
+        "action_id"
+    )
+
+    if action_result.actionId != expected_action_id:
+        raise AgentRunStateConflictError(
+            "The submitted actionId does not match "
+            "the pending CATIA action."
+        )
+
+    run_token = run_id_context.set(
+        run_id
+    )
+
+    action_token = action_id_context.set(
+        action_result.actionId
+    )
+
+    try:
+        await catia_agent_graph.ainvoke(
+            Command(
+                resume=action_result.model_dump(
+                    mode="json"
+                )
+            ),
+            config=_thread_config(
+                session_id
+            ),
+        )
+
+        current_state = _get_existing_state(
+            session_id
+        )
+
+        response = _build_current_response(
+            current_state
+        )
+
+        if response["status"] != "action_required":
+            _run_sessions.pop(
+                run_id,
+                None,
+            )
+
+        return response
+
+    finally:
+        action_id_context.reset(
+            action_token
+        )
+
+        run_id_context.reset(
+            run_token
+        )

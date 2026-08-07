@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import time
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from fastmcp import Client
-
 
 from catia_agent.config import settings
 from catia_agent.logging_config import get_logger
@@ -11,260 +14,593 @@ from catia_agent.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-MCP_SERVER_URL = settings.mcp_server_url
-MCP_TOOL_CACHE_TTL_SECONDS = (
-    settings.mcp_tool_cache_ttl_seconds
-)
 
+# -------------------------------------------------------------------------
+# Exceptions
+# -------------------------------------------------------------------------
 
-class McpToolDiscoveryError(RuntimeError):
+class McpError(RuntimeError):
     """
-    Raised when the Agent cannot discover tools from the
-    configured CATIA MCP server.
+    Base exception for MCP-related failures.
     """
 
 
-_cached_ollama_tools: list[dict[str, Any]] | None = None
-_cache_created_at: float | None = None
-_cache_lock = asyncio.Lock()
+class McpConnectionError(McpError):
+    """
+    Raised when the configured MCP server cannot be reached.
+    """
 
 
-async def discover_mcp_tools() -> list:
-    logger.info(
-        "mcp_tool_discovery_started",
-        extra={
-            "mcpServer": MCP_SERVER_URL,
-        },
+class McpToolDiscoveryError(McpError):
+    """
+    Raised when MCP tool discovery fails or returns an invalid catalog.
+    """
+
+
+class McpToolSchemaError(McpError):
+    """
+    Raised when an MCP tool definition cannot be converted into the
+    schema required by the model provider.
+    """
+
+
+# -------------------------------------------------------------------------
+# Tool catalog models
+# -------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class ToolCatalogSnapshot:
+    """
+    Immutable metadata describing the current cached tool catalog.
+    """
+
+    tools: tuple[dict[str, Any], ...]
+    created_at: float
+
+    def age_seconds(self) -> float:
+        return max(
+            0.0,
+            time.monotonic() - self.created_at,
+        )
+
+    def is_valid(
+        self,
+        ttl_seconds: float,
+    ) -> bool:
+        return self.age_seconds() < ttl_seconds
+
+
+# -------------------------------------------------------------------------
+# MCP tool schema conversion
+# -------------------------------------------------------------------------
+
+def _get_tool_attribute(
+    tool: Any,
+    *attribute_names: str,
+) -> Any:
+    """
+    Return the first available attribute from an MCP tool object.
+
+    FastMCP versions may expose schema properties using either camelCase
+    or snake_case names.
+    """
+
+    for attribute_name in attribute_names:
+        value = getattr(
+            tool,
+            attribute_name,
+            None,
+        )
+
+        if value is not None:
+            return value
+
+    if isinstance(tool, dict):
+        for attribute_name in attribute_names:
+            if attribute_name in tool:
+                return tool[attribute_name]
+
+    return None
+
+
+def _normalize_input_schema(
+    input_schema: Any,
+    *,
+    tool_name: str,
+) -> dict[str, Any]:
+    """
+    Validate and normalize an MCP input schema.
+    """
+
+    if input_schema is None:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+
+    if not isinstance(input_schema, dict):
+        raise McpToolSchemaError(
+            f"MCP tool '{tool_name}' returned an input schema "
+            "that is not a JSON object."
+        )
+
+    normalized_schema = deepcopy(input_schema)
+
+    schema_type = normalized_schema.get("type")
+
+    if schema_type is None:
+        normalized_schema["type"] = "object"
+    elif schema_type != "object":
+        raise McpToolSchemaError(
+            f"MCP tool '{tool_name}' must use an object input schema."
+        )
+
+    properties = normalized_schema.get("properties")
+
+    if properties is None:
+        normalized_schema["properties"] = {}
+    elif not isinstance(properties, dict):
+        raise McpToolSchemaError(
+            f"MCP tool '{tool_name}' has invalid schema properties."
+        )
+
+    required = normalized_schema.get("required")
+
+    if required is None:
+        normalized_schema["required"] = []
+    elif not isinstance(required, list):
+        raise McpToolSchemaError(
+            f"MCP tool '{tool_name}' has an invalid required list."
+        )
+
+    normalized_schema.setdefault(
+        "additionalProperties",
+        False,
     )
 
-    client = Client(MCP_SERVER_URL)
-
-    try:
-        async with client:
-            tools = await client.list_tools()
-
-    except Exception as exc:
-        logger.exception(
-            "mcp_tool_discovery_failed",
-            extra={
-                "mcpServer": MCP_SERVER_URL,
-            },
-        )
-
-        raise McpToolDiscoveryError(
-            "Could not connect to the CATIA MCP server at "
-            f"{MCP_SERVER_URL}."
-        ) from exc
-
-    if not tools:
-        logger.error(
-            "mcp_tool_discovery_empty",
-            extra={
-                "mcpServer": MCP_SERVER_URL,
-            },
-        )
-
-        raise McpToolDiscoveryError(
-            "The CATIA MCP server did not expose any tools."
-        )
-
-    logger.info(
-        "mcp_tool_discovery_completed",
-        extra={
-            "mcpServer": MCP_SERVER_URL,
-            "toolCount": len(tools),
-            "toolNames": [
-                getattr(tool, "name", "unknown")
-                for tool in tools
-            ],
-        },
-    )
-
-    return tools
+    return normalized_schema
 
 
 def convert_mcp_tool_to_ollama(
     mcp_tool: Any,
 ) -> dict[str, Any]:
     """
-    Convert an MCP tool definition into the native function
-    schema expected by Ollama tool calling.
+    Convert an MCP tool definition into an Ollama-compatible function
+    schema.
+
+    This conversion is isolated so a future model-provider adapter can
+    use a different schema representation without changing MCP discovery.
     """
 
-    tool_name = getattr(
+    tool_name = _get_tool_attribute(
         mcp_tool,
         "name",
-        None,
     )
 
-    tool_description = (
-        getattr(
-            mcp_tool,
-            "description",
-            None,
+    if not isinstance(tool_name, str):
+        raise McpToolSchemaError(
+            "The MCP server returned a tool without a valid name."
         )
-        or ""
-    )
 
-    input_schema = getattr(
-        mcp_tool,
-        "inputSchema",
-        None,
-    )
-
-    if input_schema is None:
-        input_schema = getattr(
-            mcp_tool,
-            "input_schema",
-            None,
-        )
+    tool_name = tool_name.strip()
 
     if not tool_name:
-        raise McpToolDiscoveryError(
-            "The MCP server returned a tool without a name."
+        raise McpToolSchemaError(
+            "The MCP server returned a tool with an empty name."
         )
 
-    if input_schema is None:
-        input_schema = {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        }
+    tool_description = _get_tool_attribute(
+        mcp_tool,
+        "description",
+    )
+
+    if tool_description is None:
+        tool_description = ""
+
+    if not isinstance(tool_description, str):
+        tool_description = str(tool_description)
+
+    input_schema = _get_tool_attribute(
+        mcp_tool,
+        "inputSchema",
+        "input_schema",
+    )
+
+    normalized_schema = _normalize_input_schema(
+        input_schema,
+        tool_name=tool_name,
+    )
 
     return {
         "type": "function",
         "function": {
             "name": tool_name,
-            "description": tool_description,
-            "parameters": input_schema,
+            "description": tool_description.strip(),
+            "parameters": normalized_schema,
         },
     }
 
 
-def is_tool_cache_valid() -> bool:
-    if _cached_ollama_tools is None:
-        return False
+# -------------------------------------------------------------------------
+# Tool catalog service
+# -------------------------------------------------------------------------
 
-    if _cache_created_at is None:
-        return False
+class McpToolCatalogService:
+    """
+    Discover, validate, convert, and cache tools from an MCP server.
 
-    cache_age = time.monotonic() - _cache_created_at
+    The service owns MCP connectivity and caching. It does not make
+    planning decisions and does not authorize execution.
+    """
 
-    return cache_age < MCP_TOOL_CACHE_TTL_SECONDS
+    def __init__(
+        self,
+        *,
+        server_url: str,
+        cache_ttl_seconds: float,
+        request_timeout_seconds: float,
+    ) -> None:
+        self._server_url = server_url
+        self._cache_ttl_seconds = cache_ttl_seconds
+        self._request_timeout_seconds = (
+            request_timeout_seconds
+        )
+
+        self._snapshot: ToolCatalogSnapshot | None = None
+        self._cache_lock = asyncio.Lock()
+
+    @property
+    def server_url(self) -> str:
+        return self._server_url
+
+    async def discover_tools(
+        self,
+    ) -> list[Any]:
+        
+        """
+        Retrieve raw tool definitions from the MCP server.
+        """
+
+        logger.info(
+            "mcp_tool_discovery_started",
+            extra={
+                "mcpServer": self._server_url,
+            },
+        )
+
+        client = Client(self._server_url)
+
+        started_at = time.perf_counter()
+
+        try:
+            async with asyncio.timeout(
+                self._request_timeout_seconds
+            ):
+                async with client:
+                    tools = await client.list_tools()
+
+        except TimeoutError as exc:
+            logger.exception(
+                "mcp_tool_discovery_timed_out",
+                extra={
+                    "mcpServer": self._server_url,
+                    "timeoutSeconds": (
+                        self._request_timeout_seconds
+                    ),
+                },
+            )
+
+            raise McpConnectionError(
+                "The CATIA MCP server did not respond within "
+                f"{self._request_timeout_seconds} seconds."
+            ) from exc
+
+        except Exception as exc:
+            logger.exception(
+                "mcp_tool_discovery_failed",
+                extra={
+                    "mcpServer": self._server_url,
+                },
+            )
+
+            raise McpConnectionError(
+                "Could not connect to the CATIA MCP server at "
+                f"{self._server_url}."
+            ) from exc
+
+        duration_ms = round(
+            (
+                time.perf_counter()
+                - started_at
+            )
+            * 1000,
+            2,
+        )
+
+        if not tools:
+            logger.error(
+                "mcp_tool_discovery_empty",
+                extra={
+                    "mcpServer": self._server_url,
+                    "durationMs": duration_ms,
+                },
+            )
+
+            raise McpToolDiscoveryError(
+                "The CATIA MCP server did not expose any tools."
+            )
+
+        logger.info(
+            "mcp_tool_discovery_completed",
+            extra={
+                "mcpServer": self._server_url,
+                "toolCount": len(tools),
+                "toolNames": [
+                    _get_tool_attribute(
+                        tool,
+                        "name",
+                    )
+                    or "unknown"
+                    for tool in tools
+                ],
+                "durationMs": duration_ms,
+            },
+        )
+
+        return list(tools)
+
+    async def _refresh_catalog(
+        self,
+    ) -> ToolCatalogSnapshot:
+        raw_tools = await self.discover_tools()
+
+        converted_tools: list[
+            dict[str, Any]
+        ] = []
+
+        discovered_names: set[str] = set()
+
+        for raw_tool in raw_tools:
+            converted_tool = (
+                convert_mcp_tool_to_ollama(
+                    raw_tool
+                )
+            )
+
+            tool_name = converted_tool[
+                "function"
+            ]["name"]
+
+            if tool_name in discovered_names:
+                raise McpToolDiscoveryError(
+                    "The MCP server exposed duplicate tool name "
+                    f"'{tool_name}'."
+                )
+
+            discovered_names.add(tool_name)
+            converted_tools.append(converted_tool)
+
+        snapshot = ToolCatalogSnapshot(
+            tools=tuple(converted_tools),
+            created_at=time.monotonic(),
+        )
+
+        self._snapshot = snapshot
+
+        logger.info(
+            "mcp_tool_cache_refreshed",
+            extra={
+                "mcpServer": self._server_url,
+                "toolCount": len(converted_tools),
+                "ttlSeconds": (
+                    self._cache_ttl_seconds
+                ),
+            },
+        )
+
+        return snapshot
+
+    async def get_model_tools(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Return model-compatible tool definitions.
+
+        A deep copy is returned so callers cannot mutate the cached
+        catalog.
+        """
+
+        snapshot = self._snapshot
+
+        if (
+            not force_refresh
+            and snapshot is not None
+            and snapshot.is_valid(
+                self._cache_ttl_seconds
+            )
+        ):
+            logger.debug(
+                "mcp_tool_cache_hit",
+                extra=self.get_cache_status(),
+            )
+
+            return deepcopy(
+                list(snapshot.tools)
+            )
+
+        async with self._cache_lock:
+            snapshot = self._snapshot
+
+            if (
+                not force_refresh
+                and snapshot is not None
+                and snapshot.is_valid(
+                    self._cache_ttl_seconds
+                )
+            ):
+                logger.debug(
+                    "mcp_tool_cache_hit_after_lock",
+                    extra=self.get_cache_status(),
+                )
+
+                return deepcopy(
+                    list(snapshot.tools)
+                )
+
+            snapshot = await self._refresh_catalog()
+
+            return deepcopy(
+                list(snapshot.tools)
+            )
+
+    def clear_cache(self) -> None:
+        """
+        Clear the process-local MCP tool catalog cache.
+        """
+
+        self._snapshot = None
+
+        logger.info(
+            "mcp_tool_cache_cleared",
+            extra={
+                "mcpServer": self._server_url,
+            },
+        )
+
+    def get_cache_status(
+        self,
+    ) -> dict[str, Any]:
+        """
+        Return non-sensitive cache diagnostics.
+        """
+
+        snapshot = self._snapshot
+
+        if snapshot is None:
+            return {
+                "cached": False,
+                "toolCount": 0,
+                "ageSeconds": None,
+                "ttlSeconds": (
+                    self._cache_ttl_seconds
+                ),
+                "valid": False,
+            }
+
+        return {
+            "cached": True,
+            "toolCount": len(snapshot.tools),
+            "ageSeconds": round(
+                snapshot.age_seconds(),
+                2,
+            ),
+            "ttlSeconds": (
+                self._cache_ttl_seconds
+            ),
+            "valid": snapshot.is_valid(
+                self._cache_ttl_seconds
+            ),
+        }
+
+    async def get_api_catalog(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Return an API-friendly representation of discovered tools.
+        """
+
+        model_tools = await self.get_model_tools(
+            force_refresh=force_refresh,
+        )
+
+        catalog: list[dict[str, Any]] = []
+
+        for tool in model_tools:
+            function = tool["function"]
+
+            catalog.append(
+                {
+                    "name": function["name"],
+                    "description": (
+                        function["description"]
+                    ),
+                    "inputSchema": (
+                        function["parameters"]
+                    ),
+                    "source": "catia-mcp",
+                }
+            )
+
+        return catalog
+
+
+# -------------------------------------------------------------------------
+# Default application service
+# -------------------------------------------------------------------------
+
+MCP_SERVER_URL = settings.mcp_server_url
+MCP_TOOL_CACHE_TTL_SECONDS = (
+    settings.mcp_tool_cache_ttl_seconds
+)
+
+tool_catalog_service = McpToolCatalogService(
+    server_url=settings.mcp_server_url,
+    cache_ttl_seconds=(
+        settings.mcp_tool_cache_ttl_seconds
+    ),
+    request_timeout_seconds=(
+        settings.mcp_request_timeout_seconds
+    ),
+)
+
+
+# -------------------------------------------------------------------------
+# Backward-compatible public functions
+# -------------------------------------------------------------------------
+
+async def discover_mcp_tools() -> list: return await tool_catalog_service.discover_tools()
 
 
 async def load_ollama_tools_from_mcp(
     force_refresh: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    Return Ollama-compatible tool definitions.
+    Compatibility entry point for the current Ollama planner.
 
-    MCP discovery is cached for a short time to avoid opening
-    a new MCP connection for every Agent request.
+    Later, the planner will depend on a model-neutral catalog method
+    instead of an Ollama-named function.
     """
 
-    global _cached_ollama_tools
-    global _cache_created_at
+    return await tool_catalog_service.get_model_tools(
+        force_refresh=force_refresh,
+    )
 
-    if not force_refresh and is_tool_cache_valid():
-        return list(_cached_ollama_tools or [])
 
-    async with _cache_lock:
-        # Another request may have refreshed the cache while
-        # this request waited for the lock.
-        if not force_refresh and is_tool_cache_valid():
-            logger.debug(
-                "mcp_tool_cache_hit",
-                extra=get_tool_cache_status(),
-            )
-
-            return list(_cached_ollama_tools or [])
-
-        mcp_tools = await discover_mcp_tools()
-
-        converted_tools = [
-            convert_mcp_tool_to_ollama(tool)
-            for tool in mcp_tools
-        ]
-
-        _cached_ollama_tools = converted_tools
-        _cache_created_at = time.monotonic()
-
-        logger.info(
-            "mcp_tool_cache_refreshed",
-            extra={
-                "toolCount": len(converted_tools),
-                "ttlSeconds": MCP_TOOL_CACHE_TTL_SECONDS,
-            },
-        )
-
-        return list(converted_tools)
+def is_tool_cache_valid() -> bool:
+    return bool(
+        tool_catalog_service
+        .get_cache_status()
+        .get("valid")
+    )
 
 
 def clear_mcp_tool_cache() -> None:
-    """
-    Clear the in-memory MCP tool cache.
-
-    The next request will perform fresh MCP discovery.
-    """
-
-    global _cached_ollama_tools
-    global _cache_created_at
-
-    _cached_ollama_tools = None
-    _cache_created_at = None
-    
-    logger.info("mcp_tool_cache_cleared")
+    tool_catalog_service.clear_cache()
 
 
 def get_tool_cache_status() -> dict[str, Any]:
-    if _cached_ollama_tools is None:
-        return {
-            "cached": False,
-            "toolCount": 0,
-            "ageSeconds": None,
-            "ttlSeconds": MCP_TOOL_CACHE_TTL_SECONDS,
-        }
-
-    age_seconds = None
-
-    if _cache_created_at is not None:
-        age_seconds = round(
-            time.monotonic() - _cache_created_at,
-            2,
-        )
-
-    return {
-        "cached": True,
-        "toolCount": len(_cached_ollama_tools),
-        "ageSeconds": age_seconds,
-        "ttlSeconds": MCP_TOOL_CACHE_TTL_SECONDS,
-    }
+    return tool_catalog_service.get_cache_status()
 
 
 async def get_mcp_tool_catalog(
     force_refresh: bool = False,
 ) -> list[dict[str, Any]]:
-    """
-    Return an API-friendly representation of the CATIA tools.
-    """
-
-    ollama_tools = await load_ollama_tools_from_mcp(
-        force_refresh=force_refresh
+    return await tool_catalog_service.get_api_catalog(
+        force_refresh=force_refresh,
     )
-
-    catalog: list[dict[str, Any]] = []
-
-    for tool in ollama_tools:
-        function = tool["function"]
-
-        catalog.append(
-            {
-                "name": function["name"],
-                "description": function["description"],
-                "inputSchema": function["parameters"],
-                "source": "catia-mcp",
-            }
-        )
-
-    return catalog

@@ -1,178 +1,582 @@
-from typing import Any, Literal
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal, TypeAlias
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
+
+from catia_agent.config import settings
 
 
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
+# Shared types
+# -------------------------------------------------------------------------
+
+NonEmptyString: TypeAlias = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+    ),
+]
+
+Identifier: TypeAlias = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=settings.max_session_id_characters,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
+]
+
+RequestIdentifier: TypeAlias = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=settings.max_request_id_characters,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
+]
+
+UserMessage: TypeAlias = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=settings.max_user_message_characters,
+    ),
+]
+
+
+# -------------------------------------------------------------------------
+# Base models
+# -------------------------------------------------------------------------
+
+class ApiModel(BaseModel):
+    """
+    Base model for API contracts.
+
+    Unknown fields are rejected so contract drift between Python,
+    MCP, and .NET is detected immediately.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+        validate_assignment=True,
+        str_strip_whitespace=True,
+    )
+
+
+class InternalModel(BaseModel):
+    """
+    Base model for internal workflow data.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        validate_assignment=True,
+        str_strip_whitespace=True,
+    )
+
+
+# -------------------------------------------------------------------------
 # Tool arguments
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 
-class OpenCadDocumentArguments(BaseModel):
-    filePath: str
+class OpenCadDocumentArguments(InternalModel):
+    filePath: NonEmptyString
 
 
-class GetActiveDocumentArguments(BaseModel):
+class GetActiveDocumentArguments(InternalModel):
     pass
 
 
-# ---------------------------------------------------------
-# CATIA actions
-# ---------------------------------------------------------
-
-class OpenCadDocumentAction(BaseModel):
-    action: Literal["open_cad_document"]
-    arguments: OpenCadDocumentArguments
-
-
-class GetActiveDocumentAction(BaseModel):
-    action: Literal["get_active_document"]
-    arguments: GetActiveDocumentArguments
-
-class CloseCadDocumentArguments(BaseModel):
+class CloseCadDocumentArguments(InternalModel):
     targetMode: Literal[
         "active",
         "named",
         "all",
     ]
 
-    documentName: str | None = None
+    documentName: NonEmptyString | None = None
 
-class CloseCadDocumentAction(BaseModel):
-    action: Literal["close_cad_document"]
-    arguments: CloseCadDocumentArguments
+    @model_validator(mode="after")
+    def validate_target_mode(
+        self,
+    ) -> CloseCadDocumentArguments:
+        if self.targetMode == "named":
+            if self.documentName is None:
+                raise ValueError(
+                    "documentName is required when targetMode "
+                    "is named."
+                )
+        elif self.documentName is not None:
+            # Bypass validate_assignment to avoid re-entering this validator.
+            object.__setattr__(self, "documentName", None)
 
-class CreateCadDocumentArguments(BaseModel):
+        return self
+
+
+class CreateCadDocumentArguments(InternalModel):
     documentType: Literal[
         "CATProduct",
         "CATPart",
         "CATDrawing",
     ]
 
-class CreateCadDocumentAction(BaseModel):
+
+class RequestClarificationArguments(InternalModel):
+    question: NonEmptyString
+
+    missingField: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=100,
+            pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$",
+        ),
+    ]
+
+
+class RouteToGeneralChatArguments(InternalModel):
+    pass
+
+class CompleteRequestArguments(InternalModel):
+    pass
+
+class ReportUnsupportedCatiaActionArguments(InternalModel):
+    requestedCapability: NonEmptyString
+
+    reason: Literal[
+        "tool_not_available",
+        "operation_not_allowed",
+        "executor_not_available",
+    ] = "tool_not_available"
+
+
+# -------------------------------------------------------------------------
+# CATIA actions
+# -------------------------------------------------------------------------
+
+class OpenCadDocumentAction(InternalModel):
+    action: Literal["open_cad_document"]
+    arguments: OpenCadDocumentArguments
+
+
+class GetActiveDocumentAction(InternalModel):
+    action: Literal["get_active_document"]
+    arguments: GetActiveDocumentArguments
+
+
+class CloseCadDocumentAction(InternalModel):
+    action: Literal["close_cad_document"]
+    arguments: CloseCadDocumentArguments
+
+
+class CreateCadDocumentAction(InternalModel):
     action: Literal["create_cad_document"]
     arguments: CreateCadDocumentArguments
 
-CatiaAction = (
-    OpenCadDocumentAction
-    | GetActiveDocumentAction
-    | CloseCadDocumentAction
-    | CreateCadDocumentAction
-)
 
-class RequestClarificationArguments(BaseModel):
-    question: str
-    missingField: str
-
-
-class RequestClarificationAction(BaseModel):
+class RequestClarificationAction(InternalModel):
     action: Literal["request_clarification"]
     arguments: RequestClarificationArguments
 
 
-class RouteToGeneralChatArguments(BaseModel):
-    pass
-
-
-class RouteToGeneralChatAction(BaseModel):
+class RouteToGeneralChatAction(InternalModel):
     action: Literal["route_to_general_chat"]
     arguments: RouteToGeneralChatArguments
 
+class CompleteRequestAction(InternalModel):
+    action: Literal["complete_request"]
+    arguments: CompleteRequestArguments
 
-# ---------------------------------------------------------
+class ReportUnsupportedCatiaAction(InternalModel):
+    action: Literal["report_unsupported_catia_action"]
+    arguments: ReportUnsupportedCatiaActionArguments
+
+
+CatiaAction: TypeAlias = Annotated[
+    OpenCadDocumentAction
+    | GetActiveDocumentAction
+    | CloseCadDocumentAction
+    | CreateCadDocumentAction,
+    Field(discriminator="action"),
+]
+
+OrchestratorAction: TypeAlias = Annotated[
+    RequestClarificationAction
+    | RouteToGeneralChatAction
+    | ReportUnsupportedCatiaAction
+    | CompleteRequestAction,
+    Field(discriminator="action"),
+]
+
+PlannerAction: TypeAlias = CatiaAction | OrchestratorAction
+
+
+# -------------------------------------------------------------------------
 # Planner results
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 
-class ActionRequiredResult(BaseModel):
+class ActionRequiredResult(InternalModel):
     status: Literal["action_required"]
     action: CatiaAction
 
 
-class UnsupportedRequestResult(BaseModel):
-    status: Literal["unsupported_request"]
-    message: str
-
-class InvalidRequestResult(BaseModel):
-    status: Literal["invalid_request"]
-    message: str
-    
-class ClarificationRequiredResult(BaseModel):
-    status: Literal["clarification_required"]
-    message: str
-    missingField: str
-
-class NonAgenticResult(BaseModel):
+class NonAgenticResult(InternalModel):
     status: Literal["non_agentic"]
-    message: str
+    message: NonEmptyString
 
-PlannerResult = (
+    routeTarget: Literal["general_chat"] = "general_chat"
+
+    routeReason: Literal[
+        "general_conversation",
+        "informational_query",
+        "non_catia_request",
+    ] = "general_conversation"
+
+
+class ClarificationRequiredResult(InternalModel):
+    status: Literal["clarification_required"]
+    message: NonEmptyString
+    missingField: NonEmptyString
+
+
+class UnsupportedRequestResult(InternalModel):
+    status: Literal["unsupported_request"]
+    message: NonEmptyString
+    requestedCapability: str | None = None
+
+    reason: Literal[
+        "tool_not_available",
+        "operation_not_allowed",
+        "executor_not_available",
+        "action_limit_reached",
+    ] = "tool_not_available"
+
+
+class InvalidRequestResult(InternalModel):
+    status: Literal["invalid_request"]
+    message: NonEmptyString
+
+
+class PlanningErrorResult(InternalModel):
+    status: Literal["planning_error"]
+    message: NonEmptyString
+
+    errorCode: Literal[
+        "MODEL_RETURNED_NO_DECISION",
+        "MODEL_RETURNED_MULTIPLE_DECISIONS",
+        "MODEL_RETURNED_INVALID_TOOL",
+        "MODEL_RETURNED_INVALID_ARGUMENTS",
+    ]
+
+class RequestCompletedResult(InternalModel):
+    status: Literal["request_completed"]
+
+PlannerResult: TypeAlias = Annotated[
     ActionRequiredResult
     | NonAgenticResult
     | ClarificationRequiredResult
     | UnsupportedRequestResult
     | InvalidRequestResult
-)
+    | PlanningErrorResult
+    | RequestCompletedResult,
+    Field(discriminator="status"),
+]
 
-# ---------------------------------------------------------
+
+# -------------------------------------------------------------------------
 # CATIA runtime context
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
 
-class CatiaDocumentContext(BaseModel):
-    name: str
+class CatiaDocumentContext(ApiModel):
+    name: NonEmptyString
+
     fullPath: str | None = None
-    documentType: str | None = None
+
+    documentType: Literal[
+        "CATProduct",
+        "CATPart",
+        "CATDrawing",
+    ] | None = None
 
 
-class CatiaSelectionContext(BaseModel):
-    name: str
+class CatiaSelectionContext(ApiModel):
+    name: NonEmptyString
     objectType: str | None = None
 
 
-class CatiaContext(BaseModel):
+class CatiaContext(ApiModel):
     isRunning: bool
+
     activeDocument: CatiaDocumentContext | None = None
 
     openDocuments: list[CatiaDocumentContext] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=500,
     )
 
     selectedObjects: list[CatiaSelectionContext] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=1000,
     )
 
-# ---------------------------------------------------------
-# HTTP API models
-# ---------------------------------------------------------
+    capturedAt: str | None = None
 
-class AgentRunRequest(BaseModel):
-    sessionId: str
-    message: str
+    contextVersion: int | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    @model_validator(mode="after")
+    def validate_runtime_state(
+        self,
+    ) -> CatiaContext:
+        if not self.isRunning:
+            if self.activeDocument is not None:
+                raise ValueError(
+                    "activeDocument must be null when CATIA "
+                    "is not running."
+                )
+
+            if self.openDocuments:
+                raise ValueError(
+                    "openDocuments must be empty when CATIA "
+                    "is not running."
+                )
+
+            if self.selectedObjects:
+                raise ValueError(
+                    "selectedObjects must be empty when CATIA "
+                    "is not running."
+                )
+
+        if (
+            self.activeDocument is not None
+            and self.openDocuments
+        ):
+            active_document_exists = any(
+                document.name == self.activeDocument.name
+                for document in self.openDocuments
+            )
+
+            if not active_document_exists:
+                raise ValueError(
+                    "activeDocument must also appear in "
+                    "openDocuments when openDocuments is supplied."
+                )
+
+        return self
+
+
+# -------------------------------------------------------------------------
+# HTTP request models
+# -------------------------------------------------------------------------
+
+class AgentRunRequest(ApiModel):
+    sessionId: Identifier
+    message: UserMessage
     catiaContext: CatiaContext | None = None
-    
 
-# ---------------------------------------------------------
-# External action execution results
-# ---------------------------------------------------------
 
-class ActionExecutionResultRequest(BaseModel):
-    actionId: str
+class ActionExecutionResultRequest(ApiModel):
+    actionId: RequestIdentifier
     success: bool
+
     data: dict[str, Any] | None = None
-    errorCode: str | None = None
-    errorMessage: str | None = None
+
+    errorCode: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=100,
+            pattern=r"^[A-Z0-9_]+$",
+        ),
+    ] | None = None
+
+    errorMessage: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=2000,
+        ),
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_result_consistency(
+        self,
+    ) -> ActionExecutionResultRequest:
+        if self.success:
+            if self.errorCode is not None:
+                raise ValueError(
+                    "errorCode must be null when success is true."
+                )
+
+            if self.errorMessage is not None:
+                raise ValueError(
+                    "errorMessage must be null when success is true."
+                )
+        else:
+            if self.errorCode is None:
+                raise ValueError(
+                    "errorCode is required when success is false."
+                )
+
+            if self.errorMessage is None:
+                raise ValueError(
+                    "errorMessage is required when success is false."
+                )
+
+        return self
 
 
-class ActionCompletedResponse(BaseModel):
+# -------------------------------------------------------------------------
+# Completed-action records
+# -------------------------------------------------------------------------
+
+class CompletedActionRecord(ApiModel):
+    action: NonEmptyString
+    actionId: RequestIdentifier
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    message: NonEmptyString
+    data: dict[str, Any] | None = None
+
+
+# -------------------------------------------------------------------------
+# Successful API responses
+# -------------------------------------------------------------------------
+
+class ActionRequiredResponse(ApiModel):
+    status: Literal["action_required"]
+    sessionId: Identifier
+    runId: RequestIdentifier
+    actionId: RequestIdentifier
+    action: CatiaAction
+
+
+class NonAgenticResponse(ApiModel):
+    status: Literal["non_agentic"]
+    sessionId: Identifier
+    runId: RequestIdentifier
+    message: NonEmptyString
+
+    routeTarget: Literal["general_chat"] = "general_chat"
+
+    routeReason: Literal[
+        "general_conversation",
+        "informational_query",
+        "non_catia_request",
+    ] = "general_conversation"
+
+    completedActions: list[CompletedActionRecord] | None = None
+
+
+class ClarificationRequiredResponse(ApiModel):
+    status: Literal["clarification_required"]
+    sessionId: Identifier
+    runId: RequestIdentifier
+    message: NonEmptyString
+    missingField: NonEmptyString
+    completedActions: list[CompletedActionRecord] | None = None
+
+
+class UnsupportedRequestResponse(ApiModel):
+    status: Literal["unsupported_request"]
+    sessionId: Identifier
+    runId: RequestIdentifier
+    message: NonEmptyString
+    requestedCapability: str | None = None
+
+    reason: Literal[
+        "tool_not_available",
+        "operation_not_allowed",
+        "executor_not_available",
+        "action_limit_reached",
+    ] = "tool_not_available"
+
+    completedActions: list[CompletedActionRecord] | None = None
+
+
+class InvalidRequestResponse(ApiModel):
+    status: Literal["invalid_request"]
+    sessionId: Identifier
+    runId: RequestIdentifier
+    message: NonEmptyString
+
+
+class PlanningErrorResponse(ApiModel):
+    status: Literal["planning_error"]
+    sessionId: Identifier
+    runId: RequestIdentifier
+    message: NonEmptyString
+    errorCode: NonEmptyString
+    completedActions: list[CompletedActionRecord] | None = None
+
+
+class ActionCompletedResponse(ApiModel):
     status: Literal["completed"]
-    sessionId: str
-    runId: str
-    actionId: str
-    message: str
+    sessionId: Identifier
+    runId: RequestIdentifier
+    actionId: RequestIdentifier | None = None
+    message: NonEmptyString
     data: dict[str, Any] | None = None
 
+    completedActions: list[CompletedActionRecord] = Field(
+        default_factory=list,
+    )
 
-class ActionFailedResponse(BaseModel):
+
+class ActionFailedResponse(ApiModel):
     status: Literal["execution_failed"]
-    sessionId: str
-    runId: str
-    actionId: str
-    message: str
-    errorCode: str | None = None
+    sessionId: Identifier
+    runId: RequestIdentifier
+    actionId: RequestIdentifier
+    message: NonEmptyString
+    errorCode: NonEmptyString
+    errorMessage: NonEmptyString
+
+    completedActions: list[CompletedActionRecord] = Field(
+        default_factory=list,
+    )
+
+
+AgentRunResponse: TypeAlias = Annotated[
+    ActionRequiredResponse
+    | NonAgenticResponse
+    | ClarificationRequiredResponse
+    | UnsupportedRequestResponse
+    | InvalidRequestResponse
+    | PlanningErrorResponse
+    | ActionCompletedResponse
+    | ActionFailedResponse,
+    Field(discriminator="status"),
+]
+
+
+# -------------------------------------------------------------------------
+# Error response models
+# -------------------------------------------------------------------------
+
+class ErrorDetail(ApiModel):
+    status: NonEmptyString
+    errorCode: NonEmptyString
+    message: NonEmptyString
+    technicalDetail: str | None = None
+    validationErrors: list[dict[str, Any]] | None = None
+
+
+class ErrorResponse(ApiModel):
+    detail: ErrorDetail
