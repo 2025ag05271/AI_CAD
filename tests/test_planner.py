@@ -595,3 +595,58 @@ async def test_plan_catia_action_no_completed_actions_message_when_empty(
     joined = "\n".join(system_contents)
 
     assert "Goal-delta analysis for this planning step." not in joined
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_no_decision_with_completed_actions_defaults_to_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.ollama_client.chat",
+        AsyncMock(return_value=fake_response),
+    )
+
+    result = await plan_catia_action(
+        user_command="Open the gearbox, then close it.",
+        completed_actions=[
+            {
+                "action": "open_cad_document",
+                "arguments": {
+                    "filePath": "C:\\TestData\\Gearbox.CATProduct",
+                },
+            }
+        ],
+    )
+
+    assert result.status == "request_completed"
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_no_decision_blocks_complete_for_high_confidence_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.ollama_client.chat",
+        AsyncMock(return_value=fake_response),
+    )
+
+    result = await plan_catia_action(
+        user_command="Open the gearbox, then close it.",
+        completed_actions=[
+            {
+                "action": "open_cad_document",
+                "arguments": {
+                    "filePath": "C:\\TestData\\Gearbox.CATProduct",
+                },
+            }
+        ],
+        planning_mode="follow_up_required",
+        planning_mode_confidence="high",
+    )
+
+    assert result.status == "planning_error"
+    assert result.errorCode == "MODEL_RETURNED_NO_DECISION"

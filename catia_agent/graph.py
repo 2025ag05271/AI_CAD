@@ -602,6 +602,12 @@ async def plan_action_node(
         ),
         conversation_history=conversation_history,
         completed_actions=completed_actions,
+        planning_mode=state.get(
+            "planning_mode"
+        ),
+        planning_mode_confidence=state.get(
+            "planning_mode_confidence"
+        ),
     )
 
     duplicate = _find_duplicate_completed_action(
@@ -630,6 +636,12 @@ async def plan_action_node(
             conversation_history=conversation_history,
             completed_actions=completed_actions,
             retry_hint=retry_hint,
+            planning_mode=state.get(
+                "planning_mode"
+            ),
+            planning_mode_confidence=state.get(
+                "planning_mode_confidence"
+            ),
         )
 
         duplicate = _find_duplicate_completed_action(

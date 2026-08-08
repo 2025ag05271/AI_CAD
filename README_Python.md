@@ -496,8 +496,9 @@ set (see `PlanningErrorResult`):
 
 - `MODEL_RETURNED_NO_DECISION` — only on the first planning pass. If the
   model returns no tool call on a *follow-up* pass and at least one
-  action has already completed, the planner treats it as an implicit
-  `complete_request` and returns `completed` instead (see Section 8.2).
+  action has already completed, the planner either treats it as an
+  implicit `complete_request` or returns `planning_error`, depending on
+  follow-up confidence (see Section 8.2).
 - `MODEL_RETURNED_MULTIPLE_DECISIONS`
 - `MODEL_RETURNED_INVALID_TOOL`
 - `MODEL_RETURNED_INVALID_ARGUMENTS`
@@ -664,7 +665,11 @@ Six things can end the sequence early:
 - **Silent-model recovery.** If the model returns no tool call at all
   on a follow-up planning pass (empty `tool_calls`) and at least one
   action has already completed in the run, the planner treats that as
-  an implicit `complete_request` and finalizes the run as `completed`.
+  an implicit `complete_request` and finalizes the run as `completed`
+  only when follow-up certainty is not high.
+  For high-confidence `follow_up_required` runs, this fallback is
+  blocked and the planner returns `planning_error` instead so explicit
+  multi-step requests cannot be silently truncated.
   This is logged as `planner_no_decision_treated_as_complete`. On the
   first planning pass (no completed actions yet), an empty response is
   still a real failure and finalizes as `planning_error` with

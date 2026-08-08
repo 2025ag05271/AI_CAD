@@ -772,6 +772,8 @@ async def plan_catia_action(
         list[dict[str, Any]] | None
     ) = None,
     retry_hint: str | None = None,
+    planning_mode: str | None = None,
+    planning_mode_confidence: str | None = None,
 ) -> PlannerResult:
     normalized_command = user_command.strip()
 
@@ -911,6 +913,38 @@ async def plan_catia_action(
 
     if not tool_calls:
         if completed_actions:
+            if (
+                planning_mode
+                == "follow_up_required"
+                and planning_mode_confidence
+                == "high"
+            ):
+                logger.warning(
+                    "planner_no_decision_blocked_followup_completion",
+                    extra={
+                        "model": MODEL_NAME,
+                        "durationMs": duration_ms,
+                        "completedActionCount": len(
+                            completed_actions
+                        ),
+                        "planningMode": planning_mode,
+                        "planningModeConfidence": (
+                            planning_mode_confidence
+                        ),
+                    },
+                )
+
+                return PlanningErrorResult(
+                    status="planning_error",
+                    errorCode=(
+                        "MODEL_RETURNED_NO_DECISION"
+                    ),
+                    message=(
+                        "The Agent could not determine the next "
+                        "required CATIA action for this request."
+                    ),
+                )
+
             logger.info(
                 "planner_no_decision_treated_as_complete",
                 extra={

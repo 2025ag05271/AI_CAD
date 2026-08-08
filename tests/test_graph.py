@@ -12,6 +12,7 @@ from catia_agent.models import (
     InvalidRequestResult,
     NonAgenticResult,
     OpenCadDocumentAction,
+    PlanningErrorResult,
     RequestCompletedResult,
 )
 
@@ -36,6 +37,8 @@ def _patch_planner(monkeypatch: pytest.MonkeyPatch, result):
         conversation_history=None,
         completed_actions=None,
         retry_hint=None,
+        planning_mode=None,
+        planning_mode_confidence=None,
     ):
         fake_plan_catia_action.last_history = conversation_history
         fake_plan_catia_action.last_completed_actions = completed_actions
@@ -681,6 +684,43 @@ async def test_sequence_stops_for_non_agentic_mid_queue(
         result["completedActions"][0]["message"]
         == "Gearbox.CATProduct was opened successfully."
     )
+
+
+@pytest.mark.asyncio
+async def test_sequence_no_decision_followup_returns_planning_error_for_multi_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [
+            _open_action_result(),
+            PlanningErrorResult(
+                status="planning_error",
+                errorCode="MODEL_RETURNED_NO_DECISION",
+                message=(
+                    "The Agent could not determine the next required "
+                    "CATIA action for this request."
+                ),
+            ),
+        ],
+    )
+
+    pending_open = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Open the gearbox, then close and download it.",
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    assert result["status"] == "planning_error"
+    assert len(result["completedActions"]) == 1
 
 
 @pytest.mark.asyncio
