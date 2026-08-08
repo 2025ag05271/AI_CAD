@@ -124,6 +124,7 @@ async def test_download_cad_accepts_plm_shape() -> None:
     assert result.data["action"] == "download_cad"
     assert result.data["arguments"]["partNumber"] == "674089800A"
     assert result.data["arguments"]["partRevision"] == "00"
+    assert result.data["arguments"]["savePath"] == "C:\\Temp"
 
 
 @pytest.mark.asyncio
@@ -182,6 +183,38 @@ async def test_download_cad_accepts_title_shape() -> None:
         )
 
     assert result.data["arguments"]["partTitle"] == "anchor plate"
+
+
+@pytest.mark.asyncio
+async def test_download_cad_accepts_explicit_save_path() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "download_cad",
+            {
+                "partNumber": "6740898",
+                "partRevision": "CAD002",
+                "savePath": "C:\\Downloads\\CATIA",
+            },
+        )
+
+    assert result.data["arguments"]["savePath"] == "C:\\Downloads\\CATIA"
+
+
+@pytest.mark.asyncio
+async def test_download_cad_rejects_relative_save_path() -> None:
+    async with Client(mcp) as client:
+        with pytest.raises(
+            ToolError,
+            match="absolute Windows path",
+        ):
+            await client.call_tool(
+                "download_cad",
+                {
+                    "partNumber": "6740898",
+                    "partRevision": "CAD002",
+                    "savePath": "Downloads\\CATIA",
+                },
+            )
 
 
 @pytest.mark.asyncio

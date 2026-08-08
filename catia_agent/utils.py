@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import PureWindowsPath
 
 
 PLM_PART_NUMBER_RE = re.compile(
@@ -34,6 +35,8 @@ DOWNLOAD_DOCUMENT_TYPE_ALIASES = {
     "drawing": "CATDrawing",
 }
 
+DEFAULT_DOWNLOAD_SAVE_PATH = r"C:\Temp"
+
 
 def normalize_download_document_type(
     document_type: str | None,
@@ -66,7 +69,8 @@ def validate_download_cad_inputs(
     part_revision: str | None,
     part_title: str | None,
     document_type: str | None,
-) -> str | None:
+    save_path: str | None,
+) -> tuple[str | None, str]:
     normalized_part_number = (
         part_number.strip()
         if part_number is not None
@@ -186,6 +190,26 @@ def validate_download_cad_inputs(
                     "the form 00."
                 )
 
-    return normalize_download_document_type(
+    normalized_document_type = normalize_download_document_type(
         document_type
     )
+
+    normalized_save_path = (
+        save_path.strip()
+        if save_path is not None
+        else ""
+    )
+
+    if not normalized_save_path:
+        normalized_save_path = DEFAULT_DOWNLOAD_SAVE_PATH
+
+    save_path_object = PureWindowsPath(
+        normalized_save_path
+    )
+
+    if not save_path_object.is_absolute():
+        raise ValueError(
+            "savePath must be an absolute Windows path."
+        )
+
+    return normalized_document_type, str(save_path_object)

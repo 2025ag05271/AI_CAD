@@ -832,7 +832,7 @@ create_cad_document     Prepare creating a new, unsaved CATPart, CATProduct,
                         separate action.
 download_cad            Prepare downloading a CAD document from PLM/Enovia.
                         Accepts either (partNumber + partRevision) or
-                        partTitle, with optional documentType.
+                        partTitle, with optional documentType and savePath.
 ```
 
 `download_cad` is the single approved tool for user intents such as
@@ -854,6 +854,10 @@ The tool accepts three deterministic input shapes:
 
 `partTitle` cannot be combined with `partNumber` or `partRevision`.
 When `partNumber` is supplied, `partRevision` is required.
+
+`savePath` is optional. When omitted, it defaults to `C:\Temp`.
+When provided, it must be an absolute Windows path. The resolved value
+is always included in the action arguments returned to .NET.
 
 ### Orchestrator-only tools (not on MCP)
 
@@ -960,10 +964,11 @@ Examples of deterministic Python validation:
 - `download_cad` enforces strict shape and format rules:
   - `partNumber + partRevision` OR `partTitle` (mutually exclusive)
   - PLM part numbers: `\d{9}[A-Z]` or `X\d{9}[A-Z]`
-  - PLM revisions: `\d{2}` (or `\d{2}-\d{2}` only when part number starts with `X`)
+  - PLM revisions: `\d{2}` (or `\d{2}-\d{2}` for `X...` part numbers)
   - CAD part numbers: `\d{7}` with revisions in `CAD\d{3}` format
   - `documentType` normalization: `part/product/assembly/drawing` ->
     `CATPart/CATProduct/CATDrawing`
+  - `savePath` defaults to `C:\Temp` and must be absolute when set
 - Exact typed action model required for each tool.
 - Unknown MCP tools rejected (the planner raises if MCP publishes a tool
   outside `APPROVED_CATIA_TOOL_NAMES`).

@@ -110,6 +110,7 @@ def test_download_cad_accepts_plm_number_and_revision() -> None:
 
     assert action.arguments.partNumber == "674089800A"
     assert action.arguments.partRevision == "00"
+    assert action.arguments.savePath == "C:\\Temp"
 
 
 def test_download_cad_accepts_x_prefixed_hyphen_revision() -> None:
@@ -153,6 +154,35 @@ def test_download_cad_accepts_cad_number_revision_and_type_alias() -> None:
     )
 
     assert action.arguments.documentType == "CATProduct"
+
+
+def test_download_cad_accepts_explicit_save_path() -> None:
+    action = DownloadCadAction.model_validate(
+        {
+            "action": "download_cad",
+            "arguments": {
+                "partNumber": "6740898",
+                "partRevision": "CAD002",
+                "savePath": "C:\\Downloads\\CATIA",
+            },
+        }
+    )
+
+    assert action.arguments.savePath == "C:\\Downloads\\CATIA"
+
+
+def test_download_cad_rejects_relative_save_path() -> None:
+    with pytest.raises(ValidationError, match="absolute Windows path"):
+        DownloadCadAction.model_validate(
+            {
+                "action": "download_cad",
+                "arguments": {
+                    "partNumber": "6740898",
+                    "partRevision": "CAD002",
+                    "savePath": "Downloads\\CATIA",
+                },
+            }
+        )
 
 
 def test_download_cad_accepts_title_lookup_shape() -> None:

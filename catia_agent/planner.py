@@ -514,6 +514,14 @@ def create_typed_action(
         "action": tool_name,
         "arguments": tool_arguments,
     }
+    
+    logger.info(
+        "planner_tool_arguments",
+        extra={
+            "tool": tool_name,
+            "arguments": tool_arguments
+        }
+    )
 
     if tool_name == "open_cad_document":
         action = (

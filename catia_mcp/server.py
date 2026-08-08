@@ -295,6 +295,7 @@ def download_cad(
     partRevision: str | None = None,
     documentType: str | None = None,
     partTitle: str | None = None,
+    savePath: str | None = None,
 ) -> dict[str, Any]:
     """
     Prepare an action to download a CAD file from the PLM system.
@@ -334,6 +335,11 @@ def download_cad(
             anchor plate
             retractor
         - Do not include partNumber or partRevision.
+
+        Save location:
+        - savePath is optional.
+        - If omitted, default is C:\\Temp.
+        - If provided, it must be an absolute Windows path.
 
     Examples:
 
@@ -375,11 +381,14 @@ def download_cad(
     if partTitle is not None:
         normalized_part_title = partTitle.strip() or None
 
-    normalized_document_type = validate_download_cad_inputs(
-        part_number=normalized_part_number,
-        part_revision=normalized_part_revision,
-        part_title=normalized_part_title,
-        document_type=documentType,
+    normalized_document_type, normalized_save_path = (
+        validate_download_cad_inputs(
+            part_number=normalized_part_number,
+            part_revision=normalized_part_revision,
+            part_title=normalized_part_title,
+            document_type=documentType,
+            save_path=savePath,
+        )
     )
 
     return create_executor_action(
@@ -389,6 +398,7 @@ def download_cad(
             "partRevision": normalized_part_revision,
             "documentType": normalized_document_type,
             "partTitle": normalized_part_title,
+            "savePath": normalized_save_path,
         },
     )
 

@@ -144,16 +144,22 @@ class DownloadCadArguments(InternalModel):
 
     partTitle: NonEmptyString | None = None
 
+    savePath: NonEmptyString | None = None
+
     @model_validator(mode="after")
     def validate_input_shape(
         self,
     ) -> DownloadCadArguments:
-        normalized_document_type = (
+        (
+            normalized_document_type,
+            normalized_save_path,
+        ) = (
             validate_download_cad_inputs(
                 part_number=self.partNumber,
                 part_revision=self.partRevision,
                 part_title=self.partTitle,
                 document_type=self.documentType,
+                save_path=self.savePath,
             )
         )
 
@@ -161,6 +167,12 @@ class DownloadCadArguments(InternalModel):
             self,
             "documentType",
             normalized_document_type,
+        )
+
+        object.__setattr__(
+            self,
+            "savePath",
+            normalized_save_path,
         )
 
         return self

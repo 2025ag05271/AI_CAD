@@ -1093,6 +1093,13 @@ C# should support the three input variants passed by Python:
 - **Title lookup shape**
     - `partTitle` only, for example `anchor plate` or `retractor`
 
+- **Save path**
+    - `savePath` is always sent by Python.
+    - If the user did not specify a location, Python defaults it to
+        `C:\Temp`.
+    - If the user specifies a location, that absolute Windows path is
+        passed through to .NET.
+
 Python already enforces these shape rules and normalizes `documentType`
 aliases (for example `part`, `product`, `drawing`) before .NET receives
 the action. .NET should still validate defensively and then dispatch to
@@ -1105,7 +1112,8 @@ Expected inbound action arguments:
     "partNumber": "X670830400C",
     "partRevision": "00-01",
     "documentType": null,
-    "partTitle": null
+    "partTitle": null,
+    "savePath": "C:\\Temp"
 }
 ```
 
