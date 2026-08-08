@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -63,6 +64,9 @@ class CatiaAgentState(TypedDict, total=False):
 
     messages: list[dict[str, str]]
     sequence_progress: list[dict[str, str]]
+    planning_mode: str
+    planning_mode_confidence: str
+    planning_mode_signals: list[str]
 
     planner_result: PlannerResult
     pending_action: CatiaAction
@@ -87,6 +91,110 @@ TERMINAL_READ_ONLY_TOOLS: frozenset[str] = frozenset()
 # -------------------------------------------------------------------------
 
 _run_sessions: dict[str, str] = {}
+
+
+ACTION_VERB_PATTERN = re.compile(
+    r"\b("
+    r"open|close|create|download|get|list|activate|save|move|"
+    r"change|replace|update|find"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+MULTI_CONNECTOR_PATTERNS = [
+    re.compile(
+        r"\b(and then|then|after that|afterward|afterwards|"
+        r"followed by|next|finally)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(also|plus)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r";",
+    ),
+]
+
+MULTI_QUANTIFIER_PATTERN = re.compile(
+    r"\b(several|multiple|many|all|every|each|both|two|three|"
+    r"four|five)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _classify_planning_mode(
+    user_message: str,
+) -> tuple[str, str, list[str]]:
+    normalized_message = user_message.strip()
+
+    if not normalized_message:
+        return (
+            "follow_up_required",
+            "low",
+            ["empty_message"],
+        )
+
+    signals: list[str] = []
+
+    action_verbs = ACTION_VERB_PATTERN.findall(
+        normalized_message
+    )
+
+    action_verb_count = len(action_verbs)
+
+    if action_verb_count == 0:
+        signals.append("no_action_verbs")
+
+        return (
+            "follow_up_required",
+            "low",
+            signals,
+        )
+
+    if action_verb_count > 1:
+        signals.append(
+            f"multiple_action_verbs:{action_verb_count}"
+        )
+
+        return (
+            "follow_up_required",
+            "high",
+            signals,
+        )
+
+    for pattern in MULTI_CONNECTOR_PATTERNS:
+        if pattern.search(normalized_message):
+            signals.append(
+                "multi_connector_detected"
+            )
+
+            return (
+                "follow_up_required",
+                "high",
+                signals,
+            )
+
+    if MULTI_QUANTIFIER_PATTERN.search(
+        normalized_message
+    ):
+        signals.append(
+            "multi_quantifier_detected"
+        )
+
+        return (
+            "follow_up_required",
+            "medium",
+            signals,
+        )
+
+    signals.append("single_action_fast_path")
+
+    return (
+        "single_action_fast_path",
+        "high",
+        signals,
+    )
 
 
 def get_session_id_for_run(
@@ -616,6 +724,24 @@ def record_action_result_node(
         completed_action
     )
 
+    logger.info(
+        "action_result_recorded",
+        extra={
+            "runId": state["run_id"],
+            "actionId": expected_action_id,
+            "selectedTool": action_name,
+            "completedActionCount": len(
+                completed_actions
+            ),
+            "planningMode": state.get(
+                "planning_mode"
+            ),
+            "planningModeConfidence": state.get(
+                "planning_mode_confidence"
+            ),
+        },
+    )
+
     sequence_progress = list(
         state.get("sequence_progress", [])
     )
@@ -666,6 +792,85 @@ def record_action_result_node(
                 final_message,
             ),
         }
+
+    is_single_fast_path = (
+        state.get("planning_mode")
+        == "single_action_fast_path"
+    )
+
+    is_high_confidence = (
+        state.get("planning_mode_confidence")
+        == "high"
+    )
+
+    is_first_successful_action = (
+        len(completed_actions) == 1
+    )
+
+    if (
+        is_single_fast_path
+        and is_high_confidence
+        and is_first_successful_action
+    ):
+        logger.info(
+            "planner_followup_skipped_single_action",
+            extra={
+                "runId": state["run_id"],
+                "selectedTool": action_name,
+                "planningModeSignals": state.get(
+                    "planning_mode_signals",
+                    [],
+                ),
+            },
+        )
+
+        final_message = _join_completed_messages(
+            completed_actions
+        )
+
+        final_response = {
+            "status": "completed",
+            "sessionId": state["session_id"],
+            "runId": state["run_id"],
+            "actionId": expected_action_id,
+            "message": final_message,
+            "data": result.data,
+            "completedActions": (
+                _serialize_completed_actions(
+                    completed_actions
+                )
+            ),
+        }
+
+        return {
+            "completed_actions": completed_actions,
+            "sequence_progress": [],
+            "planner_result": None,
+            "pending_action": None,
+            "action_result": None,
+            "final_response": final_response,
+            "messages": _record_conversation_turn(
+                state,
+                final_message,
+            ),
+        }
+
+    logger.info(
+        "planner_followup_required",
+        extra={
+            "runId": state["run_id"],
+            "selectedTool": action_name,
+            "completedActionCount": len(
+                completed_actions
+            ),
+            "planningMode": state.get(
+                "planning_mode"
+            ),
+            "planningModeConfidence": state.get(
+                "planning_mode_confidence"
+            ),
+        },
+    )
 
     return {
         "completed_actions": completed_actions,
@@ -1054,6 +1259,24 @@ async def start_catia_agent(
         run_id
     )
 
+    (
+        planning_mode,
+        planning_mode_confidence,
+        planning_mode_signals,
+    ) = _classify_planning_mode(
+        user_message
+    )
+
+    logger.info(
+        "planning_mode_classified",
+        extra={
+            "runId": run_id,
+            "mode": planning_mode,
+            "confidence": planning_mode_confidence,
+            "signals": planning_mode_signals,
+        },
+    )
+
     try:
         initial_state: CatiaAgentState = {
             "session_id": session_id,
@@ -1067,6 +1290,11 @@ async def start_catia_agent(
                 )
             ),
             "sequence_progress": [],
+            "planning_mode": planning_mode,
+            "planning_mode_confidence": (
+                planning_mode_confidence
+            ),
+            "planning_mode_signals": planning_mode_signals,
             "completed_actions": [],
             "final_response": None,
         }

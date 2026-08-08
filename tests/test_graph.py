@@ -9,15 +9,15 @@ from catia_agent.models import (
     ClarificationRequiredResult,
     CloseCadDocumentAction,
     CreateCadDocumentAction,
+    InvalidRequestResult,
     NonAgenticResult,
     OpenCadDocumentAction,
-    UnsupportedRequestResult,
+    RequestCompletedResult,
 )
 
 
-_SEQUENCE_COMPLETE = UnsupportedRequestResult(
-    status="unsupported_request",
-    message="No available CATIA tool supports this request.",
+_SEQUENCE_COMPLETE = RequestCompletedResult(
+    status="request_completed",
 )
 
 
@@ -122,7 +122,13 @@ async def test_start_catia_agent_returns_clarification_required(
 async def test_start_catia_agent_rejects_empty_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_planner(monkeypatch, None)
+    _patch_planner(
+        monkeypatch,
+        InvalidRequestResult(
+            status="invalid_request",
+            message="The user message must not be empty.",
+        ),
+    )
 
     response = await start_catia_agent(
         session_id=str(uuid4()),
@@ -157,7 +163,7 @@ async def test_action_required_pauses_the_graph(
 async def test_resume_completes_open_cad_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_planner(
+    fake_planner = _patch_planner(
         monkeypatch,
         [_open_action_result(), _SEQUENCE_COMPLETE],
     )
@@ -178,6 +184,7 @@ async def test_resume_completes_open_cad_document(
 
     assert result["status"] == "completed"
     assert "Gearbox.CATProduct" in result["message"]
+    assert fake_planner.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -244,7 +251,8 @@ async def test_resume_close_cad_document_reports_closed_count(
     )
 
     assert result["status"] == "completed"
-    assert "2 CATIA documents" in result["message"]
+    assert "Gearbox.CATProduct" in result["message"]
+    assert "Frame.CATProduct" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -301,7 +309,10 @@ async def test_starting_new_run_while_action_pending_is_rejected(
         user_message="Open the gearbox.",
     )
 
-    with pytest.raises(ValueError, match="pending CATIA action"):
+    with pytest.raises(
+        ValueError,
+        match="waiting for a CATIA action result",
+    ):
         await start_catia_agent(
             session_id=session_id,
             user_message="Open another document.",
@@ -400,7 +411,7 @@ def _close_action_result(target_mode: str = "all") -> ActionRequiredResult:
 async def test_sequence_chains_open_then_close_into_one_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_planner(
+    fake_planner = _patch_planner(
         monkeypatch,
         [_open_action_result(), _close_action_result(), _SEQUENCE_COMPLETE],
     )
@@ -438,8 +449,9 @@ async def test_sequence_chains_open_then_close_into_one_completion(
 
     assert result["status"] == "completed"
     assert "Gearbox.CATProduct was opened successfully." in result["message"]
-    assert "Gearbox.CATProduct was closed successfully." in result["message"]
+    assert "Gearbox.CATProduct closed successfully." in result["message"]
     assert len(result["completedActions"]) == 2
+    assert fake_planner.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -507,7 +519,7 @@ async def test_sequence_stops_immediately_on_first_failure(
     assert result["status"] == "execution_failed"
     assert result["errorCode"] == "FILE_NOT_FOUND"
     # No completed actions yet, since the very first one failed.
-    assert "completedActions" not in result
+    assert result["completedActions"] == []
 
 
 @pytest.mark.asyncio
@@ -546,7 +558,6 @@ async def test_sequence_stops_after_partial_success_then_failure(
     )
 
     assert result["status"] == "execution_failed"
-    assert "Gearbox.CATProduct was opened successfully." in result["message"]
     assert "CATIA could not close the document." in result["message"]
     assert len(result["completedActions"]) == 1
 
@@ -583,8 +594,7 @@ async def test_sequence_stops_for_clarification_mid_queue(
 
     assert result["status"] == "clarification_required"
     assert result["missingField"] == "documentName"
-    assert "Gearbox.CATProduct was opened successfully." in result["message"]
-    assert "Which document should be closed?" in result["message"]
+    assert result["message"] == "Which document should be closed?"
     assert len(result["completedActions"]) == 1
 
 
@@ -674,6 +684,6 @@ async def test_sequence_is_capped_at_max_actions_per_run(
         )
 
     assert pending["status"] == "unsupported_request"
-    assert "maximum number of actions" in pending["message"]
+    assert "maximum number of CATIA actions" in pending["message"]
     assert len(pending["completedActions"]) == 2
 

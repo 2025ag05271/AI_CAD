@@ -637,7 +637,10 @@ MODEL_RETURNED_INVALID_ARGUMENTS
 A single user message can require more than one CATIA action (for
 example: "open Gearbox.CATProduct and then close it"). Python does not
 ask the model to enumerate every step up front; it calls the planner
-again after each successful action within the same `runId`. This means
+again after each successful action within the same `runId` when
+follow-up planning is required. For high-confidence single-action
+requests, Python can finalize immediately after the first successful
+action without that extra follow-up planner call. This means
 the `POST /action-results` response for one action can itself return
 another `action_required` payload with the same `runId` and a new
 `actionId`. `CatiaAgentCommandHandler.HandleAsync` therefore loops on

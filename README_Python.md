@@ -603,6 +603,13 @@ planner is called again after each action succeeds, with that action's
 outcome added to the conversation context, so it can decide what (if
 anything) from the original request still remains:
 
+Before the first planning call, the graph also performs a deterministic,
+zero-model-cost request-shape classification. If the message is a
+high-confidence single CATIA action request, a fast path is enabled and
+the graph finalizes immediately after that first successful action without
+issuing a follow-up planner call. If the request is compound or uncertain,
+the existing follow-up planning loop is used.
+
 1. `plan_action` runs, the model proposes one action, it executes.
 2. On success, `record_action_result` appends the action's structured
    record and its assistant-role progress message and loops back to
@@ -681,6 +688,10 @@ stays as simple and reliable as a single-action request; nothing about
 progress-tracking live entirely in `graph.py`. See Section 16 for why
 this is not the same thing as splitting into a supervisor and specialized
 sub-agents.
+
+In high-confidence single-action requests, the fast path above avoids the
+extra follow-up planner call and reduces latency for common one-step
+commands while preserving the same terminal API contracts.
 
 ### State fields
 
@@ -1044,6 +1055,10 @@ planner_duplicate_retry_recovered
 planner_duplicate_retry_failed
 planner_no_decision_treated_as_complete
 planner_skipped_terminal_read
+planning_mode_classified
+action_result_recorded
+planner_followup_skipped_single_action
+planner_followup_required
 action_result_received
 agent_run_planned
 agent_run_resumed
