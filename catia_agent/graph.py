@@ -272,6 +272,39 @@ def _build_action_success_message(
             "successfully."
         )
 
+    if action_name == "download_cad":
+        document_name = data.get(
+            "documentName"
+        )
+
+        part_number = data.get(
+            "partNumber"
+        )
+
+        part_revision = data.get(
+            "partRevision"
+        )
+
+        if document_name:
+            return (
+                f"{document_name} was downloaded successfully."
+            )
+
+        if part_number and part_revision:
+            return (
+                f"{part_number} revision {part_revision} was "
+                "downloaded successfully."
+            )
+
+        if part_number:
+            return (
+                f"{part_number} was downloaded successfully."
+            )
+
+        return (
+            "The CAD file was downloaded successfully."
+        )
+
     return (
         "The CATIA action completed successfully."
     )

@@ -133,6 +133,54 @@ class CreateCadDocumentArguments(InternalModel):
     ]
 
 
+class DownloadCadArguments(InternalModel):
+    partNumber: NonEmptyString | None = None
+    partRevision: NonEmptyString | None = None
+
+    documentType: Literal[
+        "CATProduct",
+        "CATPart",
+        "CATDrawing",
+    ] | None = None
+
+    partTitle: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def validate_input_shape(
+        self,
+    ) -> DownloadCadArguments:
+        has_number = self.partNumber is not None
+        has_revision = self.partRevision is not None
+        has_title = self.partTitle is not None
+
+        if has_title and (has_number or has_revision):
+            raise ValueError(
+                "partTitle cannot be combined with partNumber "
+                "or partRevision."
+            )
+
+        if not has_title:
+            if has_number and not has_revision:
+                raise ValueError(
+                    "partRevision is required when partNumber "
+                    "is provided."
+                )
+
+            if has_revision and not has_number:
+                raise ValueError(
+                    "partNumber is required when partRevision "
+                    "is provided."
+                )
+
+            if not has_number:
+                raise ValueError(
+                    "download_cad requires either both "
+                    "partNumber and partRevision, or partTitle."
+                )
+
+        return self
+
+
 class RequestClarificationArguments(InternalModel):
     question: NonEmptyString
 
@@ -187,6 +235,11 @@ class CreateCadDocumentAction(InternalModel):
     arguments: CreateCadDocumentArguments
 
 
+class DownloadCadAction(InternalModel):
+    action: Literal["download_cad"]
+    arguments: DownloadCadArguments
+
+
 class RequestClarificationAction(InternalModel):
     action: Literal["request_clarification"]
     arguments: RequestClarificationArguments
@@ -209,7 +262,8 @@ CatiaAction: TypeAlias = Annotated[
     OpenCadDocumentAction
     | GetActiveDocumentAction
     | CloseCadDocumentAction
-    | CreateCadDocumentAction,
+    | CreateCadDocumentAction
+    | DownloadCadAction,
     Field(discriminator="action"),
 ]
 

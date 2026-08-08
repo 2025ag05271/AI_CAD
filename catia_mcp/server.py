@@ -287,6 +287,143 @@ def close_cad_document(
     )
 
 
+@mcp.tool
+def download_cad(
+    partNumber: str | None = None,
+    partRevision: str | None = None,
+    documentType: DocumentType | None = None,
+    partTitle: str | None = None,
+) -> dict[str, Any]:
+    """
+    Prepare an action to download a CAD file from the PLM system.
+
+    Enovia and PLM refer to the same system. Any user request to
+    download, fetch, retrieve, or get a CAD document from PLM or
+    Enovia must map to this tool.
+
+    The tool accepts three valid input shapes. Exactly one shape must
+    be used per call.
+
+    Shape 1 - PLM object identifier:
+      partNumber examples: "674089800A", "X670830400C".
+      partRevision examples: "00", "01", or "00-02" (the hyphenated
+      form is only valid when partNumber begins with "X").
+
+    Shape 2 - CAD identifier:
+      partNumber example: "6740898".
+      partRevision examples: "CAD000", "CAD002".
+      documentType is optional here.
+
+    Shape 3 - Title lookup:
+      partTitle describing the CAD by name, for example
+      "anchor plate" or "retractor". Do not include partNumber or
+      partRevision when using this shape.
+
+    documentType, when provided, must be CATPart, CATProduct, or
+    CATDrawing. If the user says "part", "product", or "drawing",
+    normalize to CATPart, CATProduct, or CATDrawing respectively.
+
+    Do not invent identifiers, revisions, or titles that were not
+    supplied by the user or resolvable from trusted conversation
+    context. If the required identifiers are unclear or missing, call
+    request_clarification instead of this tool.
+
+    This tool prepares an action for the external WPF C# executor.
+    The executor classifies which shape was supplied and calls the
+    correct PLM API to resolve and download the file. This tool does
+    not access PLM, Enovia, or the file system directly.
+
+    Args:
+        partNumber: PLM or CAD part identifier. Required together
+            with partRevision for shapes 1 and 2.
+        partRevision: PLM or CAD revision. Required together with
+            partNumber for shapes 1 and 2.
+        documentType: Optional CAD document type. Only meaningful
+            for shape 2.
+        partTitle: Human-readable CAD title. Required and used alone
+            for shape 3.
+    """
+
+    normalized_part_number: str | None = None
+    normalized_part_revision: str | None = None
+    normalized_part_title: str | None = None
+
+    if partNumber is not None:
+        normalized_part_number = partNumber.strip() or None
+
+    if partRevision is not None:
+        normalized_part_revision = partRevision.strip() or None
+
+    if partTitle is not None:
+        normalized_part_title = partTitle.strip() or None
+
+    has_number = normalized_part_number is not None
+    has_revision = normalized_part_revision is not None
+    has_title = normalized_part_title is not None
+
+    if has_title and (has_number or has_revision):
+        raise ValueError(
+            "partTitle cannot be combined with partNumber or "
+            "partRevision."
+        )
+
+    if not has_title:
+        if has_number and not has_revision:
+            raise ValueError(
+                "partRevision is required when partNumber is "
+                "provided."
+            )
+
+        if has_revision and not has_number:
+            raise ValueError(
+                "partNumber is required when partRevision is "
+                "provided."
+            )
+
+        if not has_number:
+            raise ValueError(
+                "download_cad requires either both partNumber "
+                "and partRevision, or partTitle."
+            )
+
+    if (
+        normalized_part_number is not None
+        and len(normalized_part_number) > 50
+    ):
+        raise ValueError(
+            "partNumber is too long."
+        )
+
+    if (
+        normalized_part_revision is not None
+        and len(normalized_part_revision) > 20
+    ):
+        raise ValueError(
+            "partRevision is too long."
+        )
+
+    if normalized_part_title is not None:
+        if len(normalized_part_title) < 2:
+            raise ValueError(
+                "partTitle must be at least 2 characters."
+            )
+
+        if len(normalized_part_title) > 200:
+            raise ValueError(
+                "partTitle is too long."
+            )
+
+    return create_executor_action(
+        action="download_cad",
+        arguments={
+            "partNumber": normalized_part_number,
+            "partRevision": normalized_part_revision,
+            "documentType": documentType,
+            "partTitle": normalized_part_title,
+        },
+    )
+
+
 # -------------------------------------------------------------------------
 # Server entry point
 # -------------------------------------------------------------------------

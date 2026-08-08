@@ -21,6 +21,7 @@ from catia_agent.models import (
     CloseCadDocumentAction,
     CompleteRequestAction,
     CreateCadDocumentAction,
+    DownloadCadAction,
     GetActiveDocumentAction,
     InvalidRequestResult,
     NonAgenticResult,
@@ -291,6 +292,7 @@ APPROVED_CATIA_TOOL_NAMES = frozenset(
         "open_cad_document",
         "close_cad_document",
         "create_cad_document",
+        "download_cad",
     }
 )
 
@@ -452,6 +454,7 @@ def create_typed_action(
     | GetActiveDocumentAction
     | CloseCadDocumentAction
     | CreateCadDocumentAction
+    | DownloadCadAction
     | RequestClarificationAction
     | RouteToGeneralChatAction
     | ReportUnsupportedCatiaAction
@@ -496,6 +499,13 @@ def create_typed_action(
     if tool_name == "create_cad_document":
         return (
             CreateCadDocumentAction.model_validate(
+                raw_action
+            )
+        )
+
+    if tool_name == "download_cad":
+        return (
+            DownloadCadAction.model_validate(
                 raw_action
             )
         )
@@ -1035,6 +1045,7 @@ async def plan_catia_action(
             GetActiveDocumentAction,
             CloseCadDocumentAction,
             CreateCadDocumentAction,
+            DownloadCadAction,
         ),
     ):
         return ActionRequiredResult(
