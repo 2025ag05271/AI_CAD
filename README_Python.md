@@ -680,6 +680,13 @@ Six things can end the sequence early:
   run stops with `unsupported_request` and `reason: action_limit_reached`
   once the cap is reached, reporting everything completed up to that
   point.
+- **Expected-action exhaustion short-circuit.** For high-confidence
+  `follow_up_required` requests, the graph computes expected CATIA action
+  slots from the initial spaCy predicate analysis. After each successful
+  action, if completed action count has reached that expected count, the
+  run finalizes directly as `completed` without an extra planner call for
+  `complete_request`. This reduces latency on compound requests that are
+  already fully satisfied.
 
 Every follow-up planning call after a successful action is given a
 "goal-delta" system message: the original user request is quoted, the
@@ -1065,11 +1072,13 @@ planner_duplicate_action_detected
 planner_duplicate_retry_recovered
 planner_duplicate_retry_failed
 planner_no_decision_treated_as_complete
+planner_no_decision_blocked_followup_completion
 planner_skipped_terminal_read
 planning_mode_classified
 action_result_recorded
 planner_followup_skipped_single_action
 planner_followup_required
+planner_followup_skipped_expected_actions_exhausted
 action_result_received
 agent_run_planned
 agent_run_resumed

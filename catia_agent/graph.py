@@ -66,6 +66,7 @@ class CatiaAgentState(TypedDict, total=False):
     planning_mode: str
     planning_mode_confidence: str
     planning_mode_signals: list[str]
+    planning_expected_actions: int | None
 
     planner_result: PlannerResult
     pending_action: CatiaAction
@@ -121,6 +122,15 @@ def _load_intent_nlp() -> Any | None:
 
 
 INTENT_NLP = _load_intent_nlp()
+
+CATIA_INTENT_LEMMAS = {
+    "open",
+    "close",
+    "create",
+    "download",
+    "get",
+    "list",
+}
 
 
 def _is_predicate_verb_token(
@@ -246,9 +256,45 @@ def _has_coordinated_objects(
     return False
 
 
+def _count_expected_catia_actions(
+    predicate_verbs: list[Any],
+) -> int:
+    count = 0
+
+    for token in predicate_verbs:
+        lemma = str(
+            getattr(token, "lemma_", "")
+        ).lower()
+
+        if lemma in CATIA_INTENT_LEMMAS:
+            count += 1
+
+    return count
+
+
+def _extract_predicate_count_signal(
+    signals: list[str],
+) -> int | None:
+    prefix = "multiple_root_or_conj_verbs:"
+
+    for signal in signals:
+        if not signal.startswith(prefix):
+            continue
+
+        try:
+            return int(
+                signal.split(":", maxsplit=1)[1]
+            )
+
+        except ValueError:
+            return None
+
+    return None
+
+
 def _classify_planning_mode(
     user_message: str,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], int | None]:
     normalized_message = user_message.strip()
 
     if not normalized_message:
@@ -256,6 +302,7 @@ def _classify_planning_mode(
             "follow_up_required",
             "low",
             ["empty_message"],
+            None,
         )
 
     signals: list[str] = []
@@ -267,6 +314,7 @@ def _classify_planning_mode(
             "follow_up_required",
             "low",
             signals,
+            None,
         )
 
     doc = INTENT_NLP(normalized_message)
@@ -274,6 +322,20 @@ def _classify_planning_mode(
     predicate_verbs = _extract_predicate_verbs(
         doc
     )
+
+    expected_action_count = (
+        _count_expected_catia_actions(
+            predicate_verbs
+        )
+    )
+
+    if expected_action_count > 0:
+        signals.append(
+            (
+                "expected_catia_actions:"
+                f"{expected_action_count}"
+            )
+        )
 
     predicate_count = len(predicate_verbs)
 
@@ -284,6 +346,11 @@ def _classify_planning_mode(
             "follow_up_required",
             "low",
             signals,
+            (
+                expected_action_count
+                if expected_action_count > 0
+                else None
+            ),
         )
 
     if predicate_count > 1:
@@ -298,6 +365,11 @@ def _classify_planning_mode(
             "follow_up_required",
             "high",
             signals,
+            (
+                expected_action_count
+                if expected_action_count > 0
+                else None
+            ),
         )
 
     if _has_coordinated_objects(
@@ -311,6 +383,11 @@ def _classify_planning_mode(
             "follow_up_required",
             "medium",
             signals,
+            (
+                expected_action_count
+                if expected_action_count > 0
+                else None
+            ),
         )
 
     signals.append("single_action_fast_path")
@@ -319,6 +396,11 @@ def _classify_planning_mode(
         "single_action_fast_path",
         "high",
         signals,
+        (
+            expected_action_count
+            if expected_action_count > 0
+            else None
+        ),
     )
 
 
@@ -992,6 +1074,79 @@ def record_action_result_node(
             ),
         }
 
+    expected_action_count = state.get(
+        "planning_expected_actions"
+    )
+
+    is_high_confidence_follow_up = (
+        state.get("planning_mode")
+        == "follow_up_required"
+        and is_high_confidence
+    )
+
+    if (
+        is_high_confidence_follow_up
+        and expected_action_count is not None
+        and expected_action_count > 0
+        and (
+            _extract_predicate_count_signal(
+                state.get(
+                    "planning_mode_signals",
+                    [],
+                )
+            )
+            == expected_action_count
+        )
+        and len(completed_actions)
+        >= expected_action_count
+    ):
+        logger.info(
+            "planner_followup_skipped_expected_actions_exhausted",
+            extra={
+                "runId": state["run_id"],
+                "selectedTool": action_name,
+                "expectedActionCount": expected_action_count,
+                "completedActionCount": len(
+                    completed_actions
+                ),
+                "planningModeSignals": state.get(
+                    "planning_mode_signals",
+                    [],
+                ),
+            },
+        )
+
+        final_message = _join_completed_messages(
+            completed_actions
+        )
+
+        final_response = {
+            "status": "completed",
+            "sessionId": state["session_id"],
+            "runId": state["run_id"],
+            "actionId": expected_action_id,
+            "message": final_message,
+            "data": result.data,
+            "completedActions": (
+                _serialize_completed_actions(
+                    completed_actions
+                )
+            ),
+        }
+
+        return {
+            "completed_actions": completed_actions,
+            "sequence_progress": [],
+            "planner_result": None,
+            "pending_action": None,
+            "action_result": None,
+            "final_response": final_response,
+            "messages": _record_conversation_turn(
+                state,
+                final_message,
+            ),
+        }
+
     logger.info(
         "planner_followup_required",
         extra={
@@ -1400,6 +1555,7 @@ async def start_catia_agent(
         planning_mode,
         planning_mode_confidence,
         planning_mode_signals,
+        planning_expected_actions,
     ) = _classify_planning_mode(
         user_message
     )
@@ -1411,6 +1567,9 @@ async def start_catia_agent(
             "mode": planning_mode,
             "confidence": planning_mode_confidence,
             "signals": planning_mode_signals,
+            "expectedActionCount": (
+                planning_expected_actions
+            ),
         },
     )
 
@@ -1432,6 +1591,9 @@ async def start_catia_agent(
                 planning_mode_confidence
             ),
             "planning_mode_signals": planning_mode_signals,
+            "planning_expected_actions": (
+                planning_expected_actions
+            ),
             "completed_actions": [],
             "final_response": None,
         }

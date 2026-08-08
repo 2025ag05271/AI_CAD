@@ -461,7 +461,7 @@ async def test_sequence_chains_open_then_close_into_one_completion(
 ) -> None:
     fake_planner = _patch_planner(
         monkeypatch,
-        [_open_action_result(), _close_action_result(), _SEQUENCE_COMPLETE],
+        [_open_action_result(), _close_action_result()],
     )
 
     session_id = str(uuid4())
@@ -499,7 +499,7 @@ async def test_sequence_chains_open_then_close_into_one_completion(
     assert "Gearbox.CATProduct was opened successfully." in result["message"]
     assert "Gearbox.CATProduct closed successfully." in result["message"]
     assert len(result["completedActions"]) == 2
-    assert fake_planner.call_count == 3
+    assert fake_planner.call_count == 2
 
 
 @pytest.mark.asyncio
