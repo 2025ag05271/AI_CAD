@@ -8,6 +8,7 @@ from catia_agent.models import (
     ClarificationRequiredResult,
     CloseCadDocumentAction,
     CreateCadDocumentAction,
+    DownloadCadAction,
     GetActiveDocumentAction,
     NonAgenticResult,
     OpenCadDocumentAction,
@@ -70,6 +71,20 @@ def test_create_typed_action_maps_create_cad_document() -> None:
 
     assert isinstance(action, CreateCadDocumentAction)
     assert action.arguments.documentType == "CATPart"
+
+
+def test_create_typed_action_maps_download_cad() -> None:
+    action = create_typed_action(
+        tool_name="download_cad",
+        tool_arguments={
+            "partNumber": "6740898",
+            "partRevision": "CAD002",
+            "documentType": "drawing",
+        },
+    )
+
+    assert isinstance(action, DownloadCadAction)
+    assert action.arguments.documentType == "CATDrawing"
 
 
 def test_create_typed_action_maps_request_clarification() -> None:
@@ -136,6 +151,28 @@ def test_create_typed_action_rejects_named_close_without_name() -> None:
             tool_name="close_cad_document",
             tool_arguments={
                 "targetMode": "named",
+            },
+        )
+
+
+def test_create_typed_action_rejects_invalid_download_revision() -> None:
+    with pytest.raises(ValueError, match="CAD part numbers require"):
+        create_typed_action(
+            tool_name="download_cad",
+            tool_arguments={
+                "partNumber": "6740898",
+                "partRevision": "00",
+            },
+        )
+
+
+def test_create_typed_action_rejects_x_non_hyphen_revision() -> None:
+    with pytest.raises(ValueError, match="hyphenated form"):
+        create_typed_action(
+            tool_name="download_cad",
+            tool_arguments={
+                "partNumber": "X670830400C",
+                "partRevision": "00",
             },
         )
 

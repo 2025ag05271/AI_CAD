@@ -11,6 +11,9 @@ from pydantic import (
 )
 
 from catia_agent.config import settings
+from catia_agent.utils import (
+    validate_download_cad_inputs,
+)
 
 
 # -------------------------------------------------------------------------
@@ -137,11 +140,7 @@ class DownloadCadArguments(InternalModel):
     partNumber: NonEmptyString | None = None
     partRevision: NonEmptyString | None = None
 
-    documentType: Literal[
-        "CATProduct",
-        "CATPart",
-        "CATDrawing",
-    ] | None = None
+    documentType: NonEmptyString | None = None
 
     partTitle: NonEmptyString | None = None
 
@@ -149,34 +148,20 @@ class DownloadCadArguments(InternalModel):
     def validate_input_shape(
         self,
     ) -> DownloadCadArguments:
-        has_number = self.partNumber is not None
-        has_revision = self.partRevision is not None
-        has_title = self.partTitle is not None
-
-        if has_title and (has_number or has_revision):
-            raise ValueError(
-                "partTitle cannot be combined with partNumber "
-                "or partRevision."
+        normalized_document_type = (
+            validate_download_cad_inputs(
+                part_number=self.partNumber,
+                part_revision=self.partRevision,
+                part_title=self.partTitle,
+                document_type=self.documentType,
             )
+        )
 
-        if not has_title:
-            if has_number and not has_revision:
-                raise ValueError(
-                    "partRevision is required when partNumber "
-                    "is provided."
-                )
-
-            if has_revision and not has_number:
-                raise ValueError(
-                    "partNumber is required when partRevision "
-                    "is provided."
-                )
-
-            if not has_number:
-                raise ValueError(
-                    "download_cad requires either both "
-                    "partNumber and partRevision, or partTitle."
-                )
+        object.__setattr__(
+            self,
+            "documentType",
+            normalized_document_type,
+        )
 
         return self
 

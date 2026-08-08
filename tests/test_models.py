@@ -8,6 +8,7 @@ from catia_agent.models import (
     ClarificationRequiredResult,
     CloseCadDocumentAction,
     CreateCadDocumentAction,
+    DownloadCadAction,
     GetActiveDocumentAction,
     NonAgenticResult,
     OpenCadDocumentAction,
@@ -91,6 +92,129 @@ def test_create_cad_document_action_rejects_unsupported_type() -> None:
                 "action": "create_cad_document",
                 "arguments": {
                     "documentType": "CATAnalysis",
+                },
+            }
+        )
+
+
+def test_download_cad_accepts_plm_number_and_revision() -> None:
+    action = DownloadCadAction.model_validate(
+        {
+            "action": "download_cad",
+            "arguments": {
+                "partNumber": "674089800A",
+                "partRevision": "00",
+            },
+        }
+    )
+
+    assert action.arguments.partNumber == "674089800A"
+    assert action.arguments.partRevision == "00"
+
+
+def test_download_cad_accepts_x_prefixed_hyphen_revision() -> None:
+    action = DownloadCadAction.model_validate(
+        {
+            "action": "download_cad",
+            "arguments": {
+                "partNumber": "X670830400C",
+                "partRevision": "00-02",
+            },
+        }
+    )
+
+    assert action.arguments.partNumber == "X670830400C"
+    assert action.arguments.partRevision == "00-02"
+
+
+def test_download_cad_rejects_x_prefixed_non_hyphen_revision() -> None:
+    with pytest.raises(ValidationError, match="hyphenated form"):
+        DownloadCadAction.model_validate(
+            {
+                "action": "download_cad",
+                "arguments": {
+                    "partNumber": "X670830400C",
+                    "partRevision": "00",
+                },
+            }
+        )
+
+
+def test_download_cad_accepts_cad_number_revision_and_type_alias() -> None:
+    action = DownloadCadAction.model_validate(
+        {
+            "action": "download_cad",
+            "arguments": {
+                "partNumber": "6740898",
+                "partRevision": "CAD002",
+                "documentType": "product",
+            },
+        }
+    )
+
+    assert action.arguments.documentType == "CATProduct"
+
+
+def test_download_cad_accepts_title_lookup_shape() -> None:
+    action = DownloadCadAction.model_validate(
+        {
+            "action": "download_cad",
+            "arguments": {
+                "partTitle": "anchor plate",
+            },
+        }
+    )
+
+    assert action.arguments.partTitle == "anchor plate"
+
+
+def test_download_cad_rejects_missing_revision_with_number() -> None:
+    with pytest.raises(ValidationError, match="partRevision is required"):
+        DownloadCadAction.model_validate(
+            {
+                "action": "download_cad",
+                "arguments": {
+                    "partNumber": "674089800A",
+                },
+            }
+        )
+
+
+def test_download_cad_rejects_hyphen_revision_for_non_x_part() -> None:
+    with pytest.raises(ValidationError, match="PLM part numbers require"):
+        DownloadCadAction.model_validate(
+            {
+                "action": "download_cad",
+                "arguments": {
+                    "partNumber": "674089800A",
+                    "partRevision": "00-02",
+                },
+            }
+        )
+
+
+def test_download_cad_rejects_bad_cad_revision() -> None:
+    with pytest.raises(ValidationError, match="CAD part numbers require"):
+        DownloadCadAction.model_validate(
+            {
+                "action": "download_cad",
+                "arguments": {
+                    "partNumber": "6740898",
+                    "partRevision": "00",
+                },
+            }
+        )
+
+
+def test_download_cad_rejects_title_combined_with_number_shape() -> None:
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        DownloadCadAction.model_validate(
+            {
+                "action": "download_cad",
+                "arguments": {
+                    "partNumber": "6740898",
+                    "partRevision": "CAD002",
+                    "partTitle": "retractor",
                 },
             }
         )

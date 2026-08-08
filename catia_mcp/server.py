@@ -4,6 +4,9 @@ from pathlib import PureWindowsPath
 from typing import Any, Literal
 
 from fastmcp import FastMCP
+from catia_agent.utils import (
+    validate_download_cad_inputs,
+)
 
 
 # -------------------------------------------------------------------------
@@ -44,7 +47,6 @@ CloseTargetMode = Literal[
     "named",
     "all",
 ]
-
 
 # -------------------------------------------------------------------------
 # Shared validation
@@ -291,7 +293,7 @@ def close_cad_document(
 def download_cad(
     partNumber: str | None = None,
     partRevision: str | None = None,
-    documentType: DocumentType | None = None,
+    documentType: str | None = None,
     partTitle: str | None = None,
 ) -> dict[str, Any]:
     """
@@ -306,8 +308,9 @@ def download_cad(
 
     Shape 1 - PLM object identifier:
       partNumber examples: "674089800A", "X670830400C".
-      partRevision examples: "00", "01", or "00-02" (the hyphenated
-      form is only valid when partNumber begins with "X").
+            partRevision examples: "00" or "01" for non-X part numbers.
+            For partNumber values that begin with "X", partRevision must be
+            hyphenated, for example "00-01".
 
     Shape 2 - CAD identifier:
       partNumber example: "6740898".
@@ -357,68 +360,19 @@ def download_cad(
     if partTitle is not None:
         normalized_part_title = partTitle.strip() or None
 
-    has_number = normalized_part_number is not None
-    has_revision = normalized_part_revision is not None
-    has_title = normalized_part_title is not None
-
-    if has_title and (has_number or has_revision):
-        raise ValueError(
-            "partTitle cannot be combined with partNumber or "
-            "partRevision."
-        )
-
-    if not has_title:
-        if has_number and not has_revision:
-            raise ValueError(
-                "partRevision is required when partNumber is "
-                "provided."
-            )
-
-        if has_revision and not has_number:
-            raise ValueError(
-                "partNumber is required when partRevision is "
-                "provided."
-            )
-
-        if not has_number:
-            raise ValueError(
-                "download_cad requires either both partNumber "
-                "and partRevision, or partTitle."
-            )
-
-    if (
-        normalized_part_number is not None
-        and len(normalized_part_number) > 50
-    ):
-        raise ValueError(
-            "partNumber is too long."
-        )
-
-    if (
-        normalized_part_revision is not None
-        and len(normalized_part_revision) > 20
-    ):
-        raise ValueError(
-            "partRevision is too long."
-        )
-
-    if normalized_part_title is not None:
-        if len(normalized_part_title) < 2:
-            raise ValueError(
-                "partTitle must be at least 2 characters."
-            )
-
-        if len(normalized_part_title) > 200:
-            raise ValueError(
-                "partTitle is too long."
-            )
+    normalized_document_type = validate_download_cad_inputs(
+        part_number=normalized_part_number,
+        part_revision=normalized_part_revision,
+        part_title=normalized_part_title,
+        document_type=documentType,
+    )
 
     return create_executor_action(
         action="download_cad",
         arguments={
             "partNumber": normalized_part_number,
             "partRevision": normalized_part_revision,
-            "documentType": documentType,
+            "documentType": normalized_document_type,
             "partTitle": normalized_part_title,
         },
     )

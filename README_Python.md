@@ -825,14 +825,35 @@ the external WPF and C# executor.
 ```text
 open_cad_document       Prepare opening a CATPart, CATProduct, or CATDrawing
                         by absolute Windows path.
-get_active_document     Prepare a request to retrieve the currently active
-                        CATIA document from the executor.
 close_cad_document      Prepare closing the active, a named, or all open
                         documents. targetMode is required.
 create_cad_document     Prepare creating a new, unsaved CATPart, CATProduct,
                         or CATDrawing document. No file path; saving is a
                         separate action.
+download_cad            Prepare downloading a CAD document from PLM/Enovia.
+                        Accepts either (partNumber + partRevision) or
+                        partTitle, with optional documentType.
 ```
+
+`download_cad` is the single approved tool for user intents such as
+"download from PLM", "get from Enovia", "fetch CAD", or "retrieve from
+PLM". Enovia and PLM are treated as the same system.
+
+The tool accepts three deterministic input shapes:
+
+- **PLM object identifier**
+  - `partNumber`: `674089800A` or `X670830400C`
+  - `partRevision`: `00`, `01`, and for `X...` part numbers also `00-02`
+- **CAD identifier**
+  - `partNumber`: `6740898`
+  - `partRevision`: `CAD000`, `CAD002`
+  - `documentType` (optional): `CATPart`, `CATProduct`, `CATDrawing`
+    or aliases `part`, `product`, `assembly`, `drawing`
+- **Title lookup**
+  - `partTitle` only, for example `anchor plate` or `retractor`
+
+`partTitle` cannot be combined with `partNumber` or `partRevision`.
+When `partNumber` is supplied, `partRevision` is required.
 
 ### Orchestrator-only tools (not on MCP)
 
@@ -936,6 +957,13 @@ Examples of deterministic Python validation:
 - Absolute Windows path required for document operations.
 - Approved CATIA extension required (`.catpart`, `.catproduct`,
   `.catdrawing`).
+- `download_cad` enforces strict shape and format rules:
+  - `partNumber + partRevision` OR `partTitle` (mutually exclusive)
+  - PLM part numbers: `\d{9}[A-Z]` or `X\d{9}[A-Z]`
+  - PLM revisions: `\d{2}` (or `\d{2}-\d{2}` only when part number starts with `X`)
+  - CAD part numbers: `\d{7}` with revisions in `CAD\d{3}` format
+  - `documentType` normalization: `part/product/assembly/drawing` ->
+    `CATPart/CATProduct/CATDrawing`
 - Exact typed action model required for each tool.
 - Unknown MCP tools rejected (the planner raises if MCP publishes a tool
   outside `APPROVED_CATIA_TOOL_NAMES`).

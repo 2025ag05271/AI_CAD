@@ -18,11 +18,9 @@ async def test_mcp_server_exposes_all_expected_tools() -> None:
 
     assert tool_names == {
         "open_cad_document",
-        "get_active_document",
         "create_cad_document",
         "close_cad_document",
-        "request_clarification",
-        "route_to_general_chat",
+        "download_cad",
     }
 
 
@@ -45,7 +43,7 @@ async def test_open_cad_document_prepares_action() -> None:
 @pytest.mark.asyncio
 async def test_open_cad_document_rejects_relative_path() -> None:
     async with Client(mcp) as client:
-        with pytest.raises(ToolError, match="must be absolute"):
+        with pytest.raises(ToolError, match="absolute Windows path"):
             await client.call_tool(
                 "open_cad_document",
                 {"filePath": "TestData\\Gearbox.CATProduct"},
@@ -109,33 +107,109 @@ async def test_close_cad_document_named_mode_requires_name() -> None:
 
 
 # ---------------------------------------------------------
-# request_clarification
+# download_cad
 # ---------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_request_clarification_requires_non_blank_question() -> None:
+async def test_download_cad_accepts_plm_shape() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "download_cad",
+            {
+                "partNumber": "674089800A",
+                "partRevision": "00",
+            },
+        )
+
+    assert result.data["action"] == "download_cad"
+    assert result.data["arguments"]["partNumber"] == "674089800A"
+    assert result.data["arguments"]["partRevision"] == "00"
+
+
+@pytest.mark.asyncio
+async def test_download_cad_accepts_x_prefixed_hyphen_revision() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "download_cad",
+            {
+                "partNumber": "X670830400C",
+                "partRevision": "00-02",
+            },
+        )
+
+    assert result.data["arguments"]["partRevision"] == "00-02"
+
+
+@pytest.mark.asyncio
+async def test_download_cad_rejects_x_prefixed_non_hyphen_revision() -> None:
     async with Client(mcp) as client:
         with pytest.raises(
             ToolError,
-            match="clarification question is required",
+            match="hyphenated form",
         ):
             await client.call_tool(
-                "request_clarification",
-                {"question": "   ", "missingField": "documentName"},
+                "download_cad",
+                {
+                    "partNumber": "X670830400C",
+                    "partRevision": "00",
+                },
             )
 
 
-# ---------------------------------------------------------
-# route_to_general_chat
-# ---------------------------------------------------------
-
 @pytest.mark.asyncio
-async def test_route_to_general_chat_returns_non_agentic_status() -> None:
+async def test_download_cad_accepts_cad_shape_and_normalizes_type() -> None:
     async with Client(mcp) as client:
         result = await client.call_tool(
-            "route_to_general_chat",
-            {},
+            "download_cad",
+            {
+                "partNumber": "6740898",
+                "partRevision": "CAD002",
+                "documentType": "part",
+            },
         )
 
-    assert result.data["status"] == "non_agentic"
-    assert result.data["executed"] is False
+    assert result.data["arguments"]["documentType"] == "CATPart"
+
+
+@pytest.mark.asyncio
+async def test_download_cad_accepts_title_shape() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "download_cad",
+            {
+                "partTitle": "anchor plate",
+            },
+        )
+
+    assert result.data["arguments"]["partTitle"] == "anchor plate"
+
+
+@pytest.mark.asyncio
+async def test_download_cad_rejects_missing_revision() -> None:
+    async with Client(mcp) as client:
+        with pytest.raises(
+            ToolError,
+            match="partRevision is required",
+        ):
+            await client.call_tool(
+                "download_cad",
+                {
+                    "partNumber": "674089800A",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_download_cad_rejects_non_x_hyphen_revision() -> None:
+    async with Client(mcp) as client:
+        with pytest.raises(
+            ToolError,
+            match="PLM part numbers require",
+        ):
+            await client.call_tool(
+                "download_cad",
+                {
+                    "partNumber": "674089800A",
+                    "partRevision": "00-02",
+                },
+            )
