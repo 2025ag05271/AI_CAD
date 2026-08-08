@@ -32,6 +32,7 @@ from catia_agent.models import (
     RequestClarificationAction,
     RequestCompletedResult,
     RouteToGeneralChatAction,
+    StartModelAction,
     UnsupportedRequestResult,
 )
 
@@ -301,8 +302,41 @@ APPROVED_CATIA_TOOL_NAMES = frozenset(
         "close_cad_document",
         "create_cad_document",
         "download_cad",
+        "start_model",
     }
 )
+
+IC_START_MODEL_ALIASES = (
+    " ic ",
+    " inflatable curtain ",
+    " curtain airbag ",
+)
+
+
+def _is_unsupported_ic_start_model_request(
+    user_command: str,
+) -> bool:
+    normalized_command = (
+        " "
+        + " ".join(
+            user_command.casefold().split()
+        )
+        + " "
+    )
+
+    has_model_intent = (
+        "model" in normalized_command
+        or "start" in normalized_command
+        or "create" in normalized_command
+    )
+
+    if not has_model_intent:
+        return False
+
+    return any(
+        alias in normalized_command
+        for alias in IC_START_MODEL_ALIASES
+    )
 
 
 # -------------------------------------------------------------------------
@@ -498,6 +532,7 @@ def create_typed_action(
     | CloseCadDocumentAction
     | CreateCadDocumentAction
     | DownloadCadAction
+    | StartModelAction
     | RequestClarificationAction
     | RouteToGeneralChatAction
     | ReportUnsupportedCatiaAction
@@ -560,6 +595,13 @@ def create_typed_action(
     if tool_name == "download_cad":
         return (
             DownloadCadAction.model_validate(
+                raw_action
+            )
+        )
+
+    if tool_name == "start_model":
+        return (
+            StartModelAction.model_validate(
                 raw_action
             )
         )
@@ -781,6 +823,16 @@ async def plan_catia_action(
         return InvalidRequestResult(
             status="invalid_request",
             message="The user message must not be empty.",
+        )
+
+    if _is_unsupported_ic_start_model_request(
+        normalized_command
+    ):
+        return UnsupportedRequestResult(
+            status="unsupported_request",
+            message="Currently IC start model is not supported.",
+            requestedCapability="start_model_ic",
+            reason="operation_not_allowed",
         )
 
     mcp_tools = await load_ollama_tools_from_mcp()
@@ -1128,12 +1180,28 @@ async def plan_catia_action(
 
     if isinstance(
         typed_action,
+        ReportUnsupportedCatiaAction,
+    ):
+        return UnsupportedRequestResult(
+            status="unsupported_request",
+            message=(
+                "No available CATIA tool supports this request."
+            ),
+            requestedCapability=(
+                typed_action.arguments.requestedCapability
+            ),
+            reason=typed_action.arguments.reason,
+        )
+
+    if isinstance(
+        typed_action,
         (
             OpenCadDocumentAction,
             GetActiveDocumentAction,
             CloseCadDocumentAction,
             CreateCadDocumentAction,
             DownloadCadAction,
+            StartModelAction,
         ),
     ):
         return ActionRequiredResult(

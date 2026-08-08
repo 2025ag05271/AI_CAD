@@ -21,6 +21,7 @@ async def test_mcp_server_exposes_all_expected_tools() -> None:
         "create_cad_document",
         "close_cad_document",
         "download_cad",
+        "start_model",
     }
 
 
@@ -244,5 +245,90 @@ async def test_download_cad_rejects_non_x_hyphen_revision() -> None:
                 {
                     "partNumber": "674089800A",
                     "partRevision": "00-02",
+                },
+            )
+
+
+# ---------------------------------------------------------
+# start_model
+# ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_start_model_accepts_alias_and_id() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "start_model",
+            {
+                "modelType": "side airbag",
+                "outsystemsId": "AO-2245",
+            },
+        )
+
+    assert result.data["action"] == "start_model"
+    assert result.data["arguments"]["outsystemsId"] == "AO-2245"
+    assert result.data["arguments"]["modelType"] == "SAB"
+
+
+@pytest.mark.asyncio
+async def test_start_model_accepts_seatbelt_part_shape() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "start_model",
+            {
+                "modelType": "seatbelt",
+                "partNumber": "6687874100A",
+                "partRevision": "00",
+            },
+        )
+
+    assert result.data["action"] == "start_model"
+    assert result.data["arguments"]["partNumber"] == "6687874100A"
+    assert result.data["arguments"]["partRevision"] == "00"
+    assert result.data["arguments"]["outsystemsId"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_model_accepts_9_digit_seatbelt_part_shape() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "start_model",
+            {
+                "modelType": "seatbelt",
+                "partNumber": "674089800A",
+                "partRevision": "01",
+            },
+        )
+
+    assert result.data["arguments"]["partNumber"] == "674089800A"
+    assert result.data["arguments"]["partRevision"] == "01"
+
+
+@pytest.mark.asyncio
+async def test_start_model_accepts_x_prefixed_seatbelt_part_shape() -> None:
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "start_model",
+            {
+                "modelType": "buckle",
+                "partNumber": "X6565654500A",
+                "partRevision": "00-01",
+            },
+        )
+
+    assert result.data["arguments"]["partRevision"] == "00-01"
+
+
+@pytest.mark.asyncio
+async def test_start_model_rejects_ic() -> None:
+    async with Client(mcp) as client:
+        with pytest.raises(
+            ToolError,
+            match="IC start model",
+        ):
+            await client.call_tool(
+                "start_model",
+                {
+                    "outsystemsId": "2245",
+                    "modelType": "inflatable curtain",
                 },
             )

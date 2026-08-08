@@ -14,6 +14,7 @@ from catia_agent.models import (
     OpenCadDocumentAction,
     PlanningErrorResult,
     RequestCompletedResult,
+    StartModelAction,
 )
 
 
@@ -338,6 +339,52 @@ async def test_resume_create_cad_document_reports_new_name(
 
     assert result["status"] == "completed"
     assert "Part1.CATPart" in result["message"]
+
+
+def _start_model_action_result() -> ActionRequiredResult:
+    return ActionRequiredResult(
+        status="action_required",
+        action=StartModelAction.model_validate(
+            {
+                "action": "start_model",
+                "arguments": {
+                    "outsystemsId": "2245",
+                    "modelType": "SAB",
+                },
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_start_model_uses_success_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        [_start_model_action_result(), _SEQUENCE_COMPLETE],
+    )
+
+    pending = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Start the SAB model for AO ID 2245.",
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending["actionId"],
+            success=True,
+            data={
+                "success_message": (
+                    "SAB model started successfully."
+                )
+            },
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert result["message"] == "SAB model started successfully."
 
 
 # ---------------------------------------------------------

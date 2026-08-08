@@ -14,6 +14,7 @@ from catia_agent.models import (
     OpenCadDocumentAction,
     RequestClarificationAction,
     RouteToGeneralChatAction,
+    StartModelAction,
     UnsupportedRequestResult,
 )
 
@@ -245,6 +246,125 @@ def test_download_cad_rejects_title_combined_with_number_shape() -> None:
                     "partNumber": "6740898",
                     "partRevision": "CAD002",
                     "partTitle": "retractor",
+                },
+            }
+        )
+
+
+def test_start_model_accepts_side_airbag_alias() -> None:
+    action = StartModelAction.model_validate(
+        {
+            "action": "start_model",
+            "arguments": {
+                "outsystemsId": "2245",
+                "modelType": "side airbag",
+            },
+        }
+    )
+
+    assert action.arguments.outsystemsId == "2245"
+    assert action.arguments.modelType == "SAB"
+
+
+def test_start_model_accepts_steering_wheel_alias() -> None:
+    action = StartModelAction.model_validate(
+        {
+            "action": "start_model",
+            "arguments": {
+                "outsystemsId": "AO-2245",
+                "modelType": "steering wheel",
+            },
+        }
+    )
+
+    assert action.arguments.modelType == "DU"
+
+
+def test_start_model_accepts_seatbelt_part_shape() -> None:
+    action = StartModelAction.model_validate(
+        {
+            "action": "start_model",
+            "arguments": {
+                "partNumber": "6687874100A",
+                "partRevision": "00",
+                "modelType": "seatbelt",
+            },
+        }
+    )
+
+    assert action.arguments.modelType == "SEATBELT"
+    assert action.arguments.partNumber == "6687874100A"
+    assert action.arguments.partRevision == "00"
+    assert action.arguments.outsystemsId is None
+
+
+def test_start_model_accepts_9_digit_seatbelt_part_shape() -> None:
+    action = StartModelAction.model_validate(
+        {
+            "action": "start_model",
+            "arguments": {
+                "partNumber": "674089800A",
+                "partRevision": "01",
+                "modelType": "seatbelt",
+            },
+        }
+    )
+
+    assert action.arguments.modelType == "SEATBELT"
+    assert action.arguments.partNumber == "674089800A"
+    assert action.arguments.partRevision == "01"
+
+
+def test_start_model_accepts_x_prefixed_seatbelt_part_shape() -> None:
+    action = StartModelAction.model_validate(
+        {
+            "action": "start_model",
+            "arguments": {
+                "partNumber": "X6565654500A",
+                "partRevision": "00-01",
+                "modelType": "buckle",
+            },
+        }
+    )
+
+    assert action.arguments.modelType == "SEATBELT"
+    assert action.arguments.partRevision == "00-01"
+
+
+def test_start_model_rejects_seatbelt_without_part_number() -> None:
+    with pytest.raises(ValidationError, match="partNumber and partRevision"):
+        StartModelAction.model_validate(
+            {
+                "action": "start_model",
+                "arguments": {
+                    "modelType": "seatbelt",
+                },
+            }
+        )
+
+
+def test_start_model_rejects_x_prefixed_seatbelt_bad_revision() -> None:
+    with pytest.raises(ValidationError, match="hyphenated form"):
+        StartModelAction.model_validate(
+            {
+                "action": "start_model",
+                "arguments": {
+                    "partNumber": "X6565654500A",
+                    "partRevision": "00",
+                    "modelType": "seatbelt",
+                },
+            }
+        )
+
+
+def test_start_model_rejects_ic_model() -> None:
+    with pytest.raises(ValidationError, match="IC start model"):
+        StartModelAction.model_validate(
+            {
+                "action": "start_model",
+                "arguments": {
+                    "outsystemsId": "2245",
+                    "modelType": "inflatable curtain",
                 },
             }
         )

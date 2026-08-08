@@ -15,6 +15,7 @@ from catia_agent.models import (
     OpenCadDocumentAction,
     RequestClarificationAction,
     RouteToGeneralChatAction,
+    StartModelAction,
     UnsupportedRequestResult,
 )
 from catia_agent.planner import (
@@ -86,6 +87,20 @@ def test_create_typed_action_maps_download_cad() -> None:
 
     assert isinstance(action, DownloadCadAction)
     assert action.arguments.documentType == "CATDrawing"
+
+
+def test_create_typed_action_maps_start_model() -> None:
+    action = create_typed_action(
+        tool_name="start_model",
+        tool_arguments={
+            "partNumber": "6687874100A",
+            "partRevision": "00",
+            "modelType": "buckle",
+        },
+    )
+
+    assert isinstance(action, StartModelAction)
+    assert action.arguments.modelType == "SEATBELT"
 
 
 def test_create_typed_action_maps_request_clarification() -> None:
@@ -650,3 +665,28 @@ async def test_plan_catia_action_no_decision_blocks_complete_for_high_confidence
 
     assert result.status == "planning_error"
     assert result.errorCode == "MODEL_RETURNED_NO_DECISION"
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_rejects_ic_start_model_request_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat_mock = AsyncMock(
+        return_value={"message": {"tool_calls": []}}
+    )
+
+    monkeypatch.setattr(
+        "catia_agent.planner.ollama_client.chat",
+        chat_mock,
+    )
+
+    result = await plan_catia_action(
+        user_command=(
+            "Start IC model for outsystems ID 2245."
+        ),
+    )
+
+    assert isinstance(result, UnsupportedRequestResult)
+    assert result.reason == "operation_not_allowed"
+    assert "IC start model" in result.message
+    chat_mock.assert_not_called()

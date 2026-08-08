@@ -862,6 +862,8 @@ create_cad_document     Prepare creating a new, unsaved CATPart, CATProduct,
 download_cad            Prepare downloading a CAD document from PLM/Enovia.
                         Accepts either (partNumber + partRevision) or
                         partTitle, with optional documentType and savePath.
+start_model             Prepare launching an approved CATIA start model.
+                        Requires outsystemsId, modelType and savePath.
 ```
 
 `download_cad` is the single approved tool for user intents such as
@@ -887,6 +889,27 @@ When `partNumber` is supplied, `partRevision` is required.
 `savePath` is optional. When omitted, it defaults to `C:\Temp`.
 When provided, it must be an absolute Windows path. The resolved value
 is always included in the action arguments returned to .NET.
+
+`start_model` supports these model families and aliases:
+
+- `SAB`: `side airbag`, `airbag`
+- `DU`: `driver unit`, `steering wheel`
+- `SEATBELT`: `seatbelt`, `buckle`
+
+`SAB` and `DU` use `outsystemsId`. The user may refer to it as
+Outsystems ID, AO ID, or simply ID.
+
+`SEATBELT` does not use `outsystemsId`. It requires `partNumber` and
+`partRevision` instead. The accepted seatbelt part-number shape is a
+PLM-style identifier plus trailing letter, for example `674089800A` or
+`6687874100A`, or an `X`-prefixed version such as `X6565654500A`.
+Non-`X` seatbelt part numbers use revisions like `00` or `01`.
+`X`-prefixed seatbelt part numbers require a hyphenated revision such as
+`00-01`.
+
+IC start model (`IC`, `inflatable curtain`, `curtain airbag`) is currently
+unsupported. Requests that ask to start IC return
+`unsupported_request` with message `Currently IC start model is not supported.`
 
 ### Orchestrator-only tools (not on MCP)
 

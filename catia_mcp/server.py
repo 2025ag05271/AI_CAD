@@ -6,6 +6,7 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from catia_agent.utils import (
     validate_download_cad_inputs,
+    validate_start_model_inputs,
 )
 
 
@@ -398,6 +399,69 @@ def download_cad(
             "partRevision": normalized_part_revision,
             "documentType": normalized_document_type,
             "partTitle": normalized_part_title,
+            "savePath": normalized_save_path,
+        },
+    )
+
+
+@mcp.tool
+def start_model(
+    *,
+    modelType: str,
+    outsystemsId: str | None = None,
+    partNumber: str | None = None,
+    partRevision: str | None = None,
+    savePath: str | None = None,
+) -> dict[str, Any]:
+    """
+    Prepare an action to start an approved CATIA start model.
+
+    Supported start model families:
+
+    - SAB (also called side airbag or airbag): requires outsystemsId
+    - DU (also called driver unit or steering wheel): requires outsystemsId
+    - SEATBELT (also called buckle): requires partNumber + partRevision
+
+    IC start model is currently not supported and must be rejected.
+
+    ID extraction guidance:
+    - outsystemsId is the required identifier.
+    - The user may refer to this identifier as Outsystems ID, AO ID,
+      or simply ID.
+    - Use only the ID explicitly supplied by the user.
+
+    Args:
+        outsystemsId: Outsystems/AO identifier for SAB or DU requests.
+        partNumber: Seatbelt start-model part number.
+        partRevision: Seatbelt start-model revision.
+        modelType: Requested start model family or alias.
+        Save location:
+            - savePath is optional.
+            - If omitted, default is C:\\Temp.
+            - If provided, it must be an absolute Windows path.
+    """
+
+    (
+        normalized_outsystems_id,
+        normalized_part_number,
+        normalized_part_revision,
+        normalized_model_type,
+        normalized_save_path
+    ) = validate_start_model_inputs(
+        outsystems_id=outsystemsId,
+        model_type=modelType,
+        part_number=partNumber,
+        part_revision=partRevision,
+        save_path=savePath
+    )
+
+    return create_executor_action(
+        action="start_model",
+        arguments={
+            "outsystemsId": normalized_outsystems_id,
+            "partNumber": normalized_part_number,
+            "partRevision": normalized_part_revision,
+            "modelType": normalized_model_type,
             "savePath": normalized_save_path,
         },
     )

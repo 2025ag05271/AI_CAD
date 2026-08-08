@@ -13,6 +13,7 @@ from pydantic import (
 from catia_agent.config import settings
 from catia_agent.utils import (
     validate_download_cad_inputs,
+    validate_start_model_inputs,
 )
 
 
@@ -139,11 +140,8 @@ class CreateCadDocumentArguments(InternalModel):
 class DownloadCadArguments(InternalModel):
     partNumber: NonEmptyString | None = None
     partRevision: NonEmptyString | None = None
-
     documentType: NonEmptyString | None = None
-
     partTitle: NonEmptyString | None = None
-
     savePath: NonEmptyString | None = None
 
     @model_validator(mode="after")
@@ -169,6 +167,64 @@ class DownloadCadArguments(InternalModel):
             normalized_document_type,
         )
 
+        object.__setattr__(
+            self,
+            "savePath",
+            normalized_save_path,
+        )
+
+        return self
+
+
+class StartModelArguments(InternalModel):
+    outsystemsId: NonEmptyString | None = None
+    partNumber: NonEmptyString | None = None
+    partRevision: NonEmptyString | None = None
+    savePath: NonEmptyString | None = None
+    modelType: NonEmptyString
+
+    @model_validator(mode="after")
+    def validate_input_shape(
+        self,
+    ) -> StartModelArguments:
+        (
+            normalized_outsystems_id,
+            normalized_part_number,
+            normalized_part_revision,
+            normalized_model_type,
+            normalized_save_path
+        ) = validate_start_model_inputs(
+            outsystems_id=self.outsystemsId,
+            model_type=self.modelType,
+            part_number=self.partNumber,
+            part_revision=self.partRevision,
+            save_path=self.savePath
+        )
+
+        object.__setattr__(
+            self,
+            "outsystemsId",
+            normalized_outsystems_id,
+        )
+
+        object.__setattr__(
+            self,
+            "partNumber",
+            normalized_part_number,
+        )
+
+        object.__setattr__(
+            self,
+            "partRevision",
+            normalized_part_revision,
+        )
+
+        object.__setattr__(
+            self,
+            "modelType",
+            normalized_model_type,
+        )
+        
         object.__setattr__(
             self,
             "savePath",
@@ -237,6 +293,11 @@ class DownloadCadAction(InternalModel):
     arguments: DownloadCadArguments
 
 
+class StartModelAction(InternalModel):
+    action: Literal["start_model"]
+    arguments: StartModelArguments
+
+
 class RequestClarificationAction(InternalModel):
     action: Literal["request_clarification"]
     arguments: RequestClarificationArguments
@@ -260,7 +321,8 @@ CatiaAction: TypeAlias = Annotated[
     | GetActiveDocumentAction
     | CloseCadDocumentAction
     | CreateCadDocumentAction
-    | DownloadCadAction,
+    | DownloadCadAction
+    | StartModelAction,
     Field(discriminator="action"),
 ]
 

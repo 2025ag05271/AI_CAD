@@ -37,6 +37,28 @@ DOWNLOAD_DOCUMENT_TYPE_ALIASES = {
 
 DEFAULT_DOWNLOAD_SAVE_PATH = r"C:\Temp"
 
+START_MODEL_TYPE_ALIASES = {
+    "sab": "SAB",
+    "side airbag": "SAB",
+    "airbag": "SAB",
+    "du": "DU",
+    "driver unit": "DU",
+    "steering wheel": "DU",
+    "seatbelt": "SEATBELT",
+    "buckle": "SEATBELT",
+    "ic": "IC",
+    "inflatable curtain": "IC",
+    "curtain airbag": "IC",
+}
+
+OUTSYSTEMS_ID_RE = re.compile(
+    r"^[A-Za-z0-9._:-]+$"
+)
+
+START_MODEL_PART_NUMBER_RE = re.compile(
+    r"^(?:\d{9}[A-Z]|X\d{9}[A-Z])$"
+)
+
 
 def normalize_download_document_type(
     document_type: str | None,
@@ -213,3 +235,170 @@ def validate_download_cad_inputs(
         )
 
     return normalized_document_type, str(save_path_object)
+
+
+def normalize_start_model_type(
+    model_type: str,
+) -> str:
+    normalized_input = " ".join(
+        model_type.strip().casefold().split()
+    )
+
+    if not normalized_input:
+        raise ValueError(
+            "modelType is required for start_model."
+        )
+
+    normalized = START_MODEL_TYPE_ALIASES.get(
+        normalized_input
+    )
+
+    if normalized is None:
+        raise ValueError(
+            "modelType must be SAB, DU, SEATBELT, or supported "
+            "aliases (side airbag, steering wheel, buckle)."
+        )
+
+    return normalized
+
+
+def validate_start_model_inputs(
+    *,
+    outsystems_id: str | None,
+    model_type: str,
+    part_number: str | None,
+    part_revision: str | None,
+    save_path: str | None,
+) -> tuple[str | None, str | None, str | None, str, str | None]:
+    normalized_model_type = normalize_start_model_type(
+        model_type
+    )
+
+    normalized_outsystems_id = (
+        outsystems_id.strip()
+        if outsystems_id is not None
+        else None
+    )
+    normalized_outsystems_id = (
+        normalized_outsystems_id or None
+    )
+
+    normalized_part_number = (
+        part_number.strip()
+        if part_number is not None
+        else None
+    )
+    normalized_part_number = (
+        normalized_part_number or None
+    )
+
+    normalized_part_revision = (
+        part_revision.strip()
+        if part_revision is not None
+        else None
+    )
+    normalized_part_revision = (
+        normalized_part_revision or None
+    )
+
+    if normalized_model_type == "IC":
+        raise ValueError(
+            "Currently IC start model is not supported."
+        )
+
+    normalized_save_path = (
+        save_path.strip()
+        if save_path is not None
+        else ""
+    )
+
+    if not normalized_save_path:
+        normalized_save_path = DEFAULT_DOWNLOAD_SAVE_PATH
+
+    save_path_object = PureWindowsPath(
+        normalized_save_path
+    )
+
+    if not save_path_object.is_absolute():
+        raise ValueError(
+            "savePath must be an absolute Windows path."
+        )
+
+    if normalized_model_type in {"SAB", "DU"}:
+        if normalized_part_number is not None or normalized_part_revision is not None:
+            raise ValueError(
+                "partNumber and partRevision are not used for this start model."
+            )
+
+        if normalized_outsystems_id is None:
+            raise ValueError(
+                "outsystemsId is required for SAB and DU start models."
+            )
+
+        if len(normalized_outsystems_id) > 50:
+            raise ValueError("outsystemsId is too long.")
+
+        if not OUTSYSTEMS_ID_RE.fullmatch(
+            normalized_outsystems_id
+        ):
+            raise ValueError(
+                "outsystemsId contains unsupported characters."
+            )
+
+        return (
+            normalized_outsystems_id,
+            None,
+            None,
+            normalized_model_type,
+            str(save_path_object)
+        )
+
+    if normalized_model_type == "SEATBELT":
+        if normalized_outsystems_id is not None:
+            raise ValueError(
+                "outsystemsId is not used for SEATBELT start models."
+            )
+
+        if normalized_part_number is None or normalized_part_revision is None:
+            raise ValueError(
+                "partNumber and partRevision are required for SEATBELT start models."
+            )
+
+        if len(normalized_part_number) > 50:
+            raise ValueError("partNumber is too long.")
+
+        if len(normalized_part_revision) > 20:
+            raise ValueError("partRevision is too long.")
+
+        if not START_MODEL_PART_NUMBER_RE.fullmatch(
+            normalized_part_number
+        ):
+            raise ValueError(
+                "partNumber must be a valid start-model identifier (for example 674089800A, 6687874100A, or X6565654500A)."
+            )
+
+        if normalized_part_number.startswith("X"):
+            if not PLM_X_REVISION_RE.fullmatch(
+                normalized_part_revision
+            ):
+                raise ValueError(
+                    "X-prefixed start-model part numbers require partRevision in the hyphenated form 00-01."
+                )
+        elif not PLM_REVISION_RE.fullmatch(
+            normalized_part_revision
+        ):
+            raise ValueError(
+                "SEATBELT start models require partRevision in the form 00."
+            )
+
+        return (
+            None,
+            normalized_part_number,
+            normalized_part_revision,
+            normalized_model_type,
+            str(save_path_object)
+        )
+
+    raise ValueError(
+        "Unsupported start model type."
+    )

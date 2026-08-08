@@ -176,6 +176,7 @@ CatiaCopilotAgent/
 |   |   |-- CloseCadDocumentHandler.cs
 |   |   |-- CreateCadDocumentHandler.cs
 |   |   |-- DownloadCadHandler.cs
+|   |   |-- StartModelHandler.cs
 |   |-- Interfaces/
 |   |   |-- ICatiaActionExecutor.cs
 |   |   |-- IOpenCadDocumentHandler.cs
@@ -183,6 +184,7 @@ CatiaCopilotAgent/
 |   |   |-- ICloseCadDocumentHandler.cs
 |   |   |-- ICreateCadDocumentHandler.cs
 |   |   |-- IDownloadCadHandler.cs
+|   |   |-- IStartModelHandler.cs
 |
 |-- Orchestration/
 |   |-- AgentCommandResult.cs
@@ -272,7 +274,8 @@ that same STA thread.
     "GetActiveDocumentEnabled": true,
     "CloseCadDocumentEnabled": true,
         "CreateCadDocumentEnabled": true,
-        "DownloadCadEnabled": true
+      "DownloadCadEnabled": true,
+      "StartModelEnabled": true
   },
   "Logging": {
     "LogLevel": {
@@ -308,7 +311,8 @@ defined on `CatiaAgentOptions` and `CatiaToolOptions`, or must be
 supplied via environment variables using the standard
 `CatiaAgent__BaseAddress` / `CatiaAgent__ApiPrefix` /
 `CatiaAgentTools__OpenCadDocumentEnabled` /
-`CatiaAgentTools__DownloadCadEnabled` convention. Adding a JSON file
+`CatiaAgentTools__DownloadCadEnabled` /
+`CatiaAgentTools__StartModelEnabled` convention. Adding a JSON file
 provider is a planned improvement; when it is added, remember that the
 host process is CATIA, so `AppContext.BaseDirectory` will point at the
 CATIA install directory, not this assembly's output folder.
@@ -368,6 +372,7 @@ services.AddSingleton<IGetActiveDocumentHandler, GetActiveDocumentHandler>();
 services.AddSingleton<ICloseCadDocumentHandler, CloseCadDocumentHandler>();
 services.AddSingleton<ICreateCadDocumentHandler, CreateCadDocumentHandler>();
 services.AddSingleton<IDownloadCadHandler, DownloadCadHandler>();
+services.AddSingleton<IStartModelHandler, StartModelHandler>();
 services.AddSingleton<IChatService, ChatService>();
 services.AddSingleton<ChatViewModel>();
 services.AddSingleton<ChatWindow>();
@@ -736,6 +741,9 @@ return action.Name switch
     "download_cad" when toolOptions.DownloadCadEnabled =>
         await ExecuteDownloadCadAsync(...),
 
+    "start_model" when toolOptions.StartModelEnabled =>
+        await ExecuteStartModelAsync(...),
+
     "open_cad_document" =>
         ActionExecutionResultRequest.Failed(
             actionId,
@@ -747,6 +755,12 @@ return action.Name switch
             actionId,
             "TOOL_DISABLED",
             "The download_cad tool is disabled."),
+
+    "start_model" =>
+        ActionExecutionResultRequest.Failed(
+            actionId,
+            "TOOL_DISABLED",
+            "The start_model tool is disabled."),
 
     _ =>
         ActionExecutionResultRequest.Failed(
@@ -888,22 +902,22 @@ CATIA_EXECUTION_FAILED
 Codes surfaced from the FastAPI backend and preserved by
 `CatiaAgentApiException.ErrorCode`:
 
-| HTTP | errorCode                        | Meaning                                                                             |
-|------|----------------------------------|-------------------------------------------------------------------------------------|
-| 400  | `INVALID_CONTENT_LENGTH`         | Malformed `Content-Length` header on the request.                                   |
-| 401  | `ADMIN_API_KEY_REQUIRED`         | An admin endpoint was called without `X-Admin-API-Key`.                             |
-| 403  | `ADMIN_API_KEY_INVALID`          | The supplied admin key did not match.                                               |
-| 404  | `AGENT_RUN_NOT_FOUND`            | No pending run matches the supplied `runId`.                                        |
+| HTTP | errorCode                          | Meaning                                                                                                                 |
+| ---- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 400  | `INVALID_CONTENT_LENGTH`         | Malformed`Content-Length` header on the request.                                                                      |
+| 401  | `ADMIN_API_KEY_REQUIRED`         | An admin endpoint was called without`X-Admin-API-Key`.                                                                |
+| 403  | `ADMIN_API_KEY_INVALID`          | The supplied admin key did not match.                                                                                   |
+| 404  | `AGENT_RUN_NOT_FOUND`            | No pending run matches the supplied`runId`.                                                                           |
 | 409  | `AGENT_RUN_STATE_CONFLICT`       | Run/session state is incompatible with the request (start-while-pending, mismatched runId or actionId, run not paused). |
-| 413  | `REQUEST_BODY_TOO_LARGE`         | Request body exceeded the configured size limit.                                    |
-| 422  | `REQUEST_VALIDATION_FAILED`      | The request payload failed FastAPI/Pydantic validation.                             |
-| 422  | `MODEL_SCHEMA_VALIDATION_FAILED` | An internal Pydantic model rejected a tool call or action result.                   |
-| 500  | `INTERNAL_SERVER_ERROR`          | Unhandled exception. Logged with a stack trace, not exposed to the client.          |
-| 503  | `MCP_REQUEST_FAILED`             | The CATIA MCP tool service is unreachable or returned an invalid catalog.           |
-| 503  | `MODEL_PROVIDER_FAILED`          | The configured tool-calling model provider failed (non-timeout).                    |
-| 503  | `OLLAMA_REQUEST_FAILED`          | The local Ollama service returned an error while the current provider was in use.   |
-| 504  | `MODEL_REQUEST_TIMED_OUT`        | The model did not respond within the configured timeout.                            |
-| 504  | `REQUEST_TIMED_OUT`              | FastAPI's whole-request timeout elapsed before the handler completed.               |
+| 413  | `REQUEST_BODY_TOO_LARGE`         | Request body exceeded the configured size limit.                                                                        |
+| 422  | `REQUEST_VALIDATION_FAILED`      | The request payload failed FastAPI/Pydantic validation.                                                                 |
+| 422  | `MODEL_SCHEMA_VALIDATION_FAILED` | An internal Pydantic model rejected a tool call or action result.                                                       |
+| 500  | `INTERNAL_SERVER_ERROR`          | Unhandled exception. Logged with a stack trace, not exposed to the client.                                              |
+| 503  | `MCP_REQUEST_FAILED`             | The CATIA MCP tool service is unreachable or returned an invalid catalog.                                               |
+| 503  | `MODEL_PROVIDER_FAILED`          | The configured tool-calling model provider failed (non-timeout).                                                        |
+| 503  | `OLLAMA_REQUEST_FAILED`          | The local Ollama service returned an error while the current provider was in use.                                       |
+| 504  | `MODEL_REQUEST_TIMED_OUT`        | The model did not respond within the configured timeout.                                                                |
+| 504  | `REQUEST_TIMED_OUT`              | FastAPI's whole-request timeout elapsed before the handler completed.                                                   |
 
 Only `AGENT_RUN_STATE_CONFLICT` deserves the dedicated
 `RunStateConflict` outcome. Every other code above should be routed to
@@ -1085,23 +1099,26 @@ tool.
 C# should support the three input variants passed by Python:
 
 - **PLM object identifier shape**
-    - `partNumber`: values such as `674089800A` or `X670830400C`
-    - `partRevision`:
-        - non-`X` part numbers: `00`, `01`, etc.
-        - `X`-prefixed part numbers: **hyphenated only**, for example `00-01`
-- **CAD identifier shape**
-    - `partNumber`: values such as `6740898`
-    - `partRevision`: values such as `CAD000`, `CAD002`
-    - `documentType` (optional): `CATPart`, `CATProduct`, `CATDrawing`
-- **Title lookup shape**
-    - `partTitle` only, for example `anchor plate` or `retractor`
 
+  - `partNumber`: values such as `674089800A` or `X670830400C`
+  - `partRevision`:
+    - non-`X` part numbers: `00`, `01`, etc.
+    - `X`-prefixed part numbers: **hyphenated only**, for example `00-01`
+- **CAD identifier shape**
+
+  - `partNumber`: values such as `6740898`
+  - `partRevision`: values such as `CAD000`, `CAD002`
+  - `documentType` (optional): `CATPart`, `CATProduct`, `CATDrawing`
+- **Title lookup shape**
+
+  - `partTitle` only, for example `anchor plate` or `retractor`
 - **Save path**
-    - `savePath` is always sent by Python.
-    - If the user did not specify a location, Python defaults it to
-        `C:\Temp`.
-    - If the user specifies a location, that absolute Windows path is
-        passed through to .NET.
+
+  - `savePath` is always sent by Python.
+  - If the user did not specify a location, Python defaults it to
+    `C:\Temp`.
+  - If the user specifies a location, that absolute Windows path is
+    passed through to .NET.
 
 Python already enforces these shape rules and normalizes `documentType`
 aliases (for example `part`, `product`, `drawing`) before .NET receives
@@ -1135,6 +1152,61 @@ Possible success payload (example shape; keep fields stable once chosen):
 The Python completion message builder prioritizes `documentName`, then
 `partNumber + partRevision`, then `partNumber`, so returning these fields
 improves user-facing responses.
+
+### `start_model`
+
+C# should support two deterministic argument shapes:
+
+- `SAB` and `DU`
+
+  - `outsystemsId` is required.
+  - User may have referred to it as Outsystems ID, AO ID, or ID.
+  - Python normalizes this to `outsystemsId` before dispatch.
+- `SEATBELT`
+
+  - `partNumber` and `partRevision` are required.
+  - `outsystemsId` is not used for this model family.
+- `modelType` (required)
+
+  - Canonical values sent by Python: `SAB`, `DU`, `SEATBELT`
+  - Python maps aliases before .NET receives the action:
+    - `SAB`: side airbag, airbag
+    - `DU`: driver unit, steering wheel
+    - `SEATBELT`: seatbelt, buckle
+
+IC start model (`IC`, inflatable curtain, curtain airbag) is blocked on
+the Python side and returned as `unsupported_request`. .NET should still
+validate defensively and reject unsupported model families if they ever
+arrive due to upstream drift.
+
+For `SEATBELT`, use a part number such as `674089800A`, `6687874100A`,
+or `X6565654500A` and the corresponding revision. Non-`X` part numbers
+use revisions like `00` or `01`. `X`-prefixed part numbers require a
+hyphenated revision like `00-01`.
+
+Expected inbound action arguments:
+
+```json
+{
+    "outsystemsId": "2245",
+    "modelType": "SAB",
+  	"partNumber" : "665656500A",
+  	"partRevision" : "00"
+  	"savePath": "C:\\Temp"
+}
+```
+
+Possible success payload (example shape; keep fields stable once chosen):
+
+```json
+{
+    "success_message": "SAB model started successfully."
+}
+```
+
+Python reads only `success_message` for user-facing completion text.
+Keep this payload minimal and stable so the graph can render the final
+message directly.
 
 ## 16. Adding a new tool
 
@@ -1369,10 +1441,14 @@ Before validating an Agent command, confirm:
 [ ] ChatViewModel receives ICatiaAgentCommandHandler
 [ ] Tool is enabled in CatiaAgentTools
 [ ] download_cad tool flag is configured (DownloadCadEnabled)
+[ ] start_model tool flag is configured (StartModelEnabled)
 [ ] Tool handler is registered
 [ ] download_cad handler is registered (IDownloadCadHandler)
+[ ] start_model handler is registered (IStartModelHandler)
 [ ] Dispatcher contains an explicit action branch
 [ ] Dispatcher has an explicit download_cad branch and disabled fallback
+[ ] Dispatcher has an explicit start_model branch and disabled fallback
+[ ] start_model supports SAB/DU via outsystemsId and SEATBELT via partNumber + partRevision
 [ ] Python MCP and Pydantic mappings exist
 [ ] AgentResponses.cs models action_required, completed,
     execution_failed, non_agentic, clarification_required,

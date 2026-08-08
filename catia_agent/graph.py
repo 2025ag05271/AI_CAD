@@ -128,6 +128,7 @@ CATIA_INTENT_LEMMAS = {
     "close",
     "create",
     "download",
+    "start",
     "get",
     "list",
 }
@@ -618,6 +619,18 @@ def _build_action_success_message(
 
         return (
             "The CAD file was downloaded successfully."
+        )
+
+    if action_name == "start_model":
+        success_message = data.get(
+            "success_message"
+        )
+
+        if success_message:
+            return str(success_message)
+
+        return (
+            "The CATIA start model was launched successfully."
         )
 
     return (
