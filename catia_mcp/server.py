@@ -174,7 +174,10 @@ def open_cad_document(
     )
 
 
-@mcp.tool
+# Temporarily unpublished. Uncomment @mcp.tool and re-add
+# "get_active_document" to APPROVED_CATIA_TOOL_NAMES (planner.py) and
+# TERMINAL_READ_ONLY_TOOLS (graph.py) to re-enable.
+# @mcp.tool
 def get_active_document() -> dict[str, Any]:
     """
     Prepare an action to retrieve the currently active CATIA document.

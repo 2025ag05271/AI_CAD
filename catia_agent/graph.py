@@ -78,12 +78,8 @@ class CatiaAgentState(TypedDict, total=False):
 
 # CATIA tools whose success terminates the run without another planner call.
 # These are pure reads that answer a question and never chain into a
-# follow-up action.
-TERMINAL_READ_ONLY_TOOLS: frozenset[str] = frozenset(
-    {
-        "get_active_document",
-    }
-)
+# follow-up action. Add future read tools here as they land.
+TERMINAL_READ_ONLY_TOOLS: frozenset[str] = frozenset()
 
 
 # -------------------------------------------------------------------------

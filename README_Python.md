@@ -442,7 +442,7 @@ Example completion:
 }
 ```
 
-### 7.5 Error contract
+### Error contract
 
 Every non-2xx response uses the same envelope:
 
@@ -465,22 +465,22 @@ from Pydantic and carries the underlying error list.
 
 Stable error codes produced by the API:
 
-| HTTP | errorCode                          | Source                                       | Meaning                                                                                     |
-|------|------------------------------------|----------------------------------------------|---------------------------------------------------------------------------------------------|
-| 400  | `INVALID_CONTENT_LENGTH`           | request middleware                           | The `Content-Length` header could not be parsed.                                            |
-| 401  | `ADMIN_API_KEY_REQUIRED`           | admin dependency                             | An admin endpoint was called without `X-Admin-API-Key`.                                     |
-| 403  | `ADMIN_API_KEY_INVALID`            | admin dependency                             | The supplied admin key did not match (constant-time compare).                               |
-| 404  | `AGENT_RUN_NOT_FOUND`              | action-results                               | No pending run matches the supplied `runId`.                                                |
-| 409  | `AGENT_RUN_STATE_CONFLICT`         | `/agent/runs`, action-results                | The session or run is not in a state compatible with the request (see Section 8).           |
-| 413  | `REQUEST_BODY_TOO_LARGE`           | request middleware                           | Request body exceeds `CATIA_AGENT_REQUEST_BODY_MAX_BYTES`.                                  |
-| 422  | `REQUEST_VALIDATION_FAILED`        | FastAPI request validation                   | The submitted payload did not match the API contract.                                       |
-| 422  | `MODEL_SCHEMA_VALIDATION_FAILED`   | planner and record-action-result             | The model returned a tool call or the executor returned a result that failed Pydantic.      |
-| 500  | `INTERNAL_SERVER_ERROR`            | request middleware                           | An unhandled exception was caught. Logged with a stack trace, not exposed to the client.    |
-| 503  | `MCP_REQUEST_FAILED`               | any endpoint that touches MCP                | The CATIA MCP tool service was unreachable or returned an invalid catalog.                  |
-| 503  | `MODEL_PROVIDER_FAILED`            | planner                                      | The configured tool-calling model provider failed (non-timeout).                            |
-| 503  | `OLLAMA_REQUEST_FAILED`            | planner                                      | Ollama returned an error while the current provider was making a request.                   |
-| 504  | `MODEL_REQUEST_TIMED_OUT`          | planner                                      | The model did not respond within `CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS`.               |
-| 504  | `REQUEST_TIMED_OUT`                | request middleware                           | The request did not complete within `CATIA_AGENT_REQUEST_TIMEOUT_SECONDS`.                  |
+| HTTP | errorCode                          | Source                           | Meaning                                                                                  |
+| ---- | ---------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------- |
+| 400  | `INVALID_CONTENT_LENGTH`         | request middleware               | The`Content-Length` header could not be parsed.                                        |
+| 401  | `ADMIN_API_KEY_REQUIRED`         | admin dependency                 | An admin endpoint was called without`X-Admin-API-Key`.                                 |
+| 403  | `ADMIN_API_KEY_INVALID`          | admin dependency                 | The supplied admin key did not match (constant-time compare).                            |
+| 404  | `AGENT_RUN_NOT_FOUND`            | action-results                   | No pending run matches the supplied`runId`.                                            |
+| 409  | `AGENT_RUN_STATE_CONFLICT`       | `/agent/runs`, action-results  | The session or run is not in a state compatible with the request (see Section 8).        |
+| 413  | `REQUEST_BODY_TOO_LARGE`         | request middleware               | Request body exceeds`CATIA_AGENT_REQUEST_BODY_MAX_BYTES`.                              |
+| 422  | `REQUEST_VALIDATION_FAILED`      | FastAPI request validation       | The submitted payload did not match the API contract.                                    |
+| 422  | `MODEL_SCHEMA_VALIDATION_FAILED` | planner and record-action-result | The model returned a tool call or the executor returned a result that failed Pydantic.   |
+| 500  | `INTERNAL_SERVER_ERROR`          | request middleware               | An unhandled exception was caught. Logged with a stack trace, not exposed to the client. |
+| 503  | `MCP_REQUEST_FAILED`             | any endpoint that touches MCP    | The CATIA MCP tool service was unreachable or returned an invalid catalog.               |
+| 503  | `MODEL_PROVIDER_FAILED`          | planner                          | The configured tool-calling model provider failed (non-timeout).                         |
+| 503  | `OLLAMA_REQUEST_FAILED`          | planner                          | Ollama returned an error while the current provider was making a request.                |
+| 504  | `MODEL_REQUEST_TIMED_OUT`        | planner                          | The model did not respond within`CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS`.          |
+| 504  | `REQUEST_TIMED_OUT`              | request middleware               | The request did not complete within`CATIA_AGENT_REQUEST_TIMEOUT_SECONDS`.              |
 
 `AGENT_RUN_STATE_CONFLICT` is deliberately narrow — only the three
 run-state guards enumerated in Section 8 raise it. All other failures

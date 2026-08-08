@@ -289,7 +289,6 @@ ORCHESTRATOR_TOOL_NAMES = frozenset(
 APPROVED_CATIA_TOOL_NAMES = frozenset(
     {
         "open_cad_document",
-        "get_active_document",
         "close_cad_document",
         "create_cad_document",
     }
