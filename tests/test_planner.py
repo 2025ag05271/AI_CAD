@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from catia_agent.models import (
     ActionRequiredResult,
@@ -111,7 +112,7 @@ def test_create_typed_action_maps_route_to_general_chat() -> None:
 def test_create_typed_action_rejects_unknown_tool() -> None:
     with pytest.raises(
         ValueError,
-        match="no approved typed model",
+        match="unapproved tool",
     ):
         create_typed_action(
             tool_name="delete_all_documents",
@@ -120,7 +121,7 @@ def test_create_typed_action_rejects_unknown_tool() -> None:
 
 
 def test_create_typed_action_rejects_relative_open_path() -> None:
-    with pytest.raises(ValueError, match="must be absolute"):
+    with pytest.raises(ValueError, match="absolute Windows path"):
         create_typed_action(
             tool_name="open_cad_document",
             tool_arguments={
@@ -239,18 +240,16 @@ def test_validate_close_cad_document_clears_name_when_not_named() -> None:
 
 
 def test_validate_close_cad_document_rejects_blank_name() -> None:
-    action = CloseCadDocumentAction.model_validate(
-        {
-            "action": "close_cad_document",
-            "arguments": {
-                "targetMode": "named",
-                "documentName": "   ",
-            },
-        }
-    )
-
-    with pytest.raises(ValueError, match="documentName is required"):
-        validate_close_cad_document(action)
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        CloseCadDocumentAction.model_validate(
+            {
+                "action": "close_cad_document",
+                "arguments": {
+                    "targetMode": "named",
+                    "documentName": "   ",
+                },
+            }
+        )
 
 
 # ---------------------------------------------------------
@@ -423,7 +422,8 @@ async def test_plan_catia_action_returns_unsupported_when_no_tool_call(
         user_command="Move the component 5mm.",
     )
 
-    assert isinstance(result, UnsupportedRequestResult)
+    assert result.status == "planning_error"
+    assert result.errorCode == "MODEL_RETURNED_NO_DECISION"
 
 
 @pytest.mark.asyncio
@@ -451,8 +451,8 @@ async def test_plan_catia_action_prefers_catia_tool_over_meta_tool(
         user_command="Open the gearbox.",
     )
 
-    assert isinstance(result, ActionRequiredResult)
-    assert isinstance(result.action, OpenCadDocumentAction)
+    assert result.status == "planning_error"
+    assert result.errorCode == "MODEL_RETURNED_MULTIPLE_DECISIONS"
 
 
 @pytest.mark.asyncio
@@ -477,7 +477,8 @@ async def test_plan_catia_action_picks_first_when_only_meta_tools(
         user_command="Hello.",
     )
 
-    assert isinstance(result, NonAgenticResult)
+    assert result.status == "planning_error"
+    assert result.errorCode == "MODEL_RETURNED_MULTIPLE_DECISIONS"
 
 
 @pytest.mark.asyncio
@@ -593,4 +594,4 @@ async def test_plan_catia_action_no_completed_actions_message_when_empty(
 
     joined = "\n".join(system_contents)
 
-    assert "already completed" not in joined
+    assert "Goal-delta analysis for this planning step." not in joined

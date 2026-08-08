@@ -175,12 +175,14 @@ CatiaCopilotAgent/
 |   |   |-- GetActiveDocumentHandler.cs
 |   |   |-- CloseCadDocumentHandler.cs
 |   |   |-- CreateCadDocumentHandler.cs
+|   |   |-- DownloadCadHandler.cs
 |   |-- Interfaces/
 |   |   |-- ICatiaActionExecutor.cs
 |   |   |-- IOpenCadDocumentHandler.cs
 |   |   |-- IGetActiveDocumentHandler.cs
 |   |   |-- ICloseCadDocumentHandler.cs
 |   |   |-- ICreateCadDocumentHandler.cs
+|   |   |-- IDownloadCadHandler.cs
 |
 |-- Orchestration/
 |   |-- AgentCommandResult.cs
@@ -269,7 +271,8 @@ that same STA thread.
     "OpenCadDocumentEnabled": true,
     "GetActiveDocumentEnabled": true,
     "CloseCadDocumentEnabled": true,
-    "CreateCadDocumentEnabled": true
+        "CreateCadDocumentEnabled": true,
+        "DownloadCadEnabled": true
   },
   "Logging": {
     "LogLevel": {
@@ -304,7 +307,8 @@ An `appsettings.json` file is **not** shipped or loaded today. All
 defined on `CatiaAgentOptions` and `CatiaToolOptions`, or must be
 supplied via environment variables using the standard
 `CatiaAgent__BaseAddress` / `CatiaAgent__ApiPrefix` /
-`CatiaAgentTools__OpenCadDocumentEnabled` convention. Adding a JSON file
+`CatiaAgentTools__OpenCadDocumentEnabled` /
+`CatiaAgentTools__DownloadCadEnabled` convention. Adding a JSON file
 provider is a planned improvement; when it is added, remember that the
 host process is CATIA, so `AppContext.BaseDirectory` will point at the
 CATIA install directory, not this assembly's output folder.
@@ -363,6 +367,7 @@ services.AddSingleton<IOpenCadDocumentHandler, OpenCadDocumentHandler>();
 services.AddSingleton<IGetActiveDocumentHandler, GetActiveDocumentHandler>();
 services.AddSingleton<ICloseCadDocumentHandler, CloseCadDocumentHandler>();
 services.AddSingleton<ICreateCadDocumentHandler, CreateCadDocumentHandler>();
+services.AddSingleton<IDownloadCadHandler, DownloadCadHandler>();
 services.AddSingleton<IChatService, ChatService>();
 services.AddSingleton<ChatViewModel>();
 services.AddSingleton<ChatWindow>();
@@ -725,11 +730,20 @@ return action.Name switch
     "create_cad_document" when toolOptions.CreateCadDocumentEnabled =>
         await ExecuteCreateCadDocumentAsync(...),
 
+    "download_cad" when toolOptions.DownloadCadEnabled =>
+        await ExecuteDownloadCadAsync(...),
+
     "open_cad_document" =>
         ActionExecutionResultRequest.Failed(
             actionId,
             "TOOL_DISABLED",
             "The open_cad_document tool is disabled."),
+
+    "download_cad" =>
+        ActionExecutionResultRequest.Failed(
+            actionId,
+            "TOOL_DISABLED",
+            "The download_cad tool is disabled."),
 
     _ =>
         ActionExecutionResultRequest.Failed(
@@ -1063,6 +1077,54 @@ consistent with `open_cad_document`. This tool only creates the
 in-memory document; saving it to disk is a separate, not-yet-implemented
 tool.
 
+### `download_cad`
+
+C# should support the three input variants passed by Python:
+
+- **PLM object identifier shape**
+    - `partNumber`: values such as `674089800A` or `X670830400C`
+    - `partRevision`:
+        - non-`X` part numbers: `00`, `01`, etc.
+        - `X`-prefixed part numbers: **hyphenated only**, for example `00-01`
+- **CAD identifier shape**
+    - `partNumber`: values such as `6740898`
+    - `partRevision`: values such as `CAD000`, `CAD002`
+    - `documentType` (optional): `CATPart`, `CATProduct`, `CATDrawing`
+- **Title lookup shape**
+    - `partTitle` only, for example `anchor plate` or `retractor`
+
+Python already enforces these shape rules and normalizes `documentType`
+aliases (for example `part`, `product`, `drawing`) before .NET receives
+the action. .NET should still validate defensively and then dispatch to
+the appropriate PLM/TIF lookup path based on which shape is present.
+
+Expected inbound action arguments:
+
+```json
+{
+    "partNumber": "X670830400C",
+    "partRevision": "00-01",
+    "documentType": null,
+    "partTitle": null
+}
+```
+
+Possible success payload (example shape; keep fields stable once chosen):
+
+```json
+{
+    "documentName": "AnchorPlate.CATPart",
+    "partNumber": "X670830400C",
+    "partRevision": "00-01",
+    "documentType": "CATPart",
+    "fullPath": "C:\\PLMCache\\AnchorPlate.CATPart"
+}
+```
+
+The Python completion message builder prioritizes `documentName`, then
+`partNumber + partRevision`, then `partNumber`, so returning these fields
+improves user-facing responses.
+
 ## 16. Adding a new tool
 
 Every new tool must be implemented on both the Python and .NET sides.
@@ -1204,6 +1266,7 @@ A future WPF tool list can expose checkboxes such as:
 ```text
 [x] open_cad_document
 [x] get_active_document
+[x] download_cad
 [x] list_open_documents
 [ ] move_component
 [ ] save_document
@@ -1294,8 +1357,11 @@ Before validating an Agent command, confirm:
 [ ] ChatWindow is resolved from DI
 [ ] ChatViewModel receives ICatiaAgentCommandHandler
 [ ] Tool is enabled in CatiaAgentTools
+[ ] download_cad tool flag is configured (DownloadCadEnabled)
 [ ] Tool handler is registered
+[ ] download_cad handler is registered (IDownloadCadHandler)
 [ ] Dispatcher contains an explicit action branch
+[ ] Dispatcher has an explicit download_cad branch and disabled fallback
 [ ] Python MCP and Pydantic mappings exist
 [ ] AgentResponses.cs models action_required, completed,
     execution_failed, non_agentic, clarification_required,

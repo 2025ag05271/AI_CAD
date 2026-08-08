@@ -299,52 +299,67 @@ def download_cad(
     """
     Prepare an action to download a CAD file from the PLM system.
 
-    Enovia and PLM refer to the same system. Any user request to
-    download, fetch, retrieve, or get a CAD document from PLM or
-    Enovia must map to this tool.
+    Enovia and PLM are the same system. Requests that imply download,
+    fetch, retrieve, get, obtain, or locate a CAD document from PLM or
+    Enovia should use this tool.
 
-    The tool accepts three valid input shapes. Exactly one shape must
-    be used per call.
+    Supported input shapes:
 
-    Shape 1 - PLM object identifier:
-      partNumber examples: "674089800A", "X670830400C".
-            partRevision examples: "00" or "01" for non-X part numbers.
-            For partNumber values that begin with "X", partRevision must be
-            hyphenated, for example "00-01".
+        1) PLM object shape
+        - partNumber + partRevision
+        - Examples:
+            674089800A + 00
+            X670830400C + 00-02
+        - For X-prefixed part numbers, revisions are typically
+            hyphenated (for example 00-01 or 00-02).
 
-    Shape 2 - CAD identifier:
-      partNumber example: "6740898".
-      partRevision examples: "CAD000", "CAD002".
-      documentType is optional here.
+        2) CAD identifier shape
+        - partNumber + partRevision
+        - Examples:
+            6328629 + CAD000
+            6328629 + CAD002
+        - documentType is optional unless the user explicitly
+            mentions a type. If mentioned, populate it.
+        - Normalize:
+            part -> CATPart
+            cat part -> CATPart
+            product -> CATProduct
+            cat product -> CATProduct
+            drawing -> CATDrawing
+            cat drawing -> CATDrawing
 
-    Shape 3 - Title lookup:
-      partTitle describing the CAD by name, for example
-      "anchor plate" or "retractor". Do not include partNumber or
-      partRevision when using this shape.
+        3) Title lookup shape
+        - partTitle only
+        - Examples:
+            anchor plate
+            retractor
+        - Do not include partNumber or partRevision.
 
-    documentType, when provided, must be CATPart, CATProduct, or
-    CATDrawing. If the user says "part", "product", or "drawing",
-    normalize to CATPart, CATProduct, or CATDrawing respectively.
+    Examples:
 
-    Do not invent identifiers, revisions, or titles that were not
-    supplied by the user or resolvable from trusted conversation
-    context. If the required identifiers are unclear or missing, call
-    request_clarification instead of this tool.
+        User: "download cat part 6328629 CAD000"
+        Arguments:
+        partNumber = "6328629"
+        partRevision = "CAD000"
+        documentType = "CATPart"
 
-    This tool prepares an action for the external WPF C# executor.
-    The executor classifies which shape was supplied and calls the
-    correct PLM API to resolve and download the file. This tool does
-    not access PLM, Enovia, or the file system directly.
+        User: "fetch X670830400C revision 00-02 from enovia"
+        Arguments:
+        partNumber = "X670830400C"
+        partRevision = "00-02"
 
-    Args:
-        partNumber: PLM or CAD part identifier. Required together
-            with partRevision for shapes 1 and 2.
-        partRevision: PLM or CAD revision. Required together with
-            partNumber for shapes 1 and 2.
-        documentType: Optional CAD document type. Only meaningful
-            for shape 2.
-        partTitle: Human-readable CAD title. Required and used alone
-            for shape 3.
+        User: "download anchor plate"
+        Arguments:
+        partTitle = "anchor plate"
+
+    General rules:
+        - Do not invent partNumber, partRevision, documentType, or partTitle.
+        - Use user-provided values or trusted conversation context.
+        - If required identifiers are missing or ambiguous,
+        use request_clarification instead.
+
+    This tool only prepares the request. The external WPF C# executor
+    classifies the shape and calls the correct PLM/TIF API.
     """
 
     normalized_part_number: str | None = None

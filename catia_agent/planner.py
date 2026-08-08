@@ -149,6 +149,14 @@ model_client: ToolCallingModelClient = (
     )
 )
 
+# Backward-compatible alias for tests and legacy call sites that patch
+# the raw Ollama client's chat method.
+ollama_client = getattr(
+    model_client,
+    "_client",
+    None,
+)
+
 
 # -------------------------------------------------------------------------
 # Orchestrator-only tools
@@ -446,6 +454,41 @@ def validate_open_cad_document(
         )
 
 
+def validate_close_cad_document(
+    action: CloseCadDocumentAction,
+) -> None:
+    target_mode = action.arguments.targetMode
+    document_name = action.arguments.documentName
+
+    if target_mode == "named":
+        if document_name is None:
+            raise ValueError(
+                "documentName is required when targetMode "
+                "is named."
+            )
+
+        normalized_name = document_name.strip()
+
+        if not normalized_name:
+            raise ValueError(
+                "documentName is required when targetMode "
+                "is named."
+            )
+
+        object.__setattr__(
+            action.arguments,
+            "documentName",
+            normalized_name,
+        )
+        return
+
+    object.__setattr__(
+        action.arguments,
+        "documentName",
+        None,
+    )
+
+
 def create_typed_action(
     tool_name: str,
     tool_arguments: dict[str, Any],
@@ -490,11 +533,14 @@ def create_typed_action(
         )
 
     if tool_name == "close_cad_document":
-        return (
+        action = (
             CloseCadDocumentAction.model_validate(
                 raw_action
             )
         )
+
+        validate_close_cad_document(action)
+        return action
 
     if tool_name == "create_cad_document":
         return (
