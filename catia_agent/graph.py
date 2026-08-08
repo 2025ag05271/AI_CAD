@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -92,35 +91,159 @@ TERMINAL_READ_ONLY_TOOLS: frozenset[str] = frozenset()
 
 _run_sessions: dict[str, str] = {}
 
+def _load_intent_nlp() -> Any | None:
+    try:
+        import spacy
 
-ACTION_VERB_PATTERN = re.compile(
-    r"\b("
-    r"open|close|create|download|get|list|activate|save|move|"
-    r"change|replace|update|find"
-    r")\b",
-    flags=re.IGNORECASE,
-)
+    except ImportError:
+        logger.warning(
+            "planning_mode_nlp_unavailable",
+            extra={
+                "reason": "spacy_not_installed",
+            },
+        )
 
-MULTI_CONNECTOR_PATTERNS = [
-    re.compile(
-        r"\b(and then|then|after that|afterward|afterwards|"
-        r"followed by|next|finally)\b",
-        flags=re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(also|plus)\b",
-        flags=re.IGNORECASE,
-    ),
-    re.compile(
-        r";",
-    ),
-]
+        return None
 
-MULTI_QUANTIFIER_PATTERN = re.compile(
-    r"\b(several|multiple|many|all|every|each|both|two|three|"
-    r"four|five)\b",
-    flags=re.IGNORECASE,
-)
+    try:
+        return spacy.load("en_core_web_sm")
+
+    except Exception as exc:
+        logger.warning(
+            "planning_mode_nlp_unavailable",
+            extra={
+                "reason": "spacy_model_load_failed",
+                "error": str(exc),
+            },
+        )
+
+        return None
+
+
+INTENT_NLP = _load_intent_nlp()
+
+
+def _is_predicate_verb_token(
+    token: Any,
+) -> bool:
+    part_of_speech = str(
+        getattr(token, "pos_", "")
+    ).upper()
+
+    if part_of_speech in {"VERB", "AUX"}:
+        return True
+
+    tag = str(getattr(token, "tag_", "")).upper()
+
+    return tag.startswith("VB")
+
+
+def _looks_imperative_predicate(
+    token: Any,
+) -> bool:
+    if str(getattr(token, "dep_", "")).lower() != "root":
+        return False
+
+    object_dependencies = {
+        "dobj",
+        "obj",
+        "pobj",
+        "attr",
+    }
+
+    for child in getattr(token, "children", []):
+        dependency = str(
+            getattr(child, "dep_", "")
+        ).lower()
+
+        if dependency in object_dependencies:
+            return True
+
+    return False
+
+
+def _extract_predicate_verbs(
+    doc: Any,
+) -> list[Any]:
+    predicates: dict[int, Any] = {}
+
+    for token in doc:
+        dependency = str(
+            getattr(token, "dep_", "")
+        ).lower()
+
+        if dependency == "root" and _is_predicate_verb_token(
+            token
+        ):
+            predicates[int(token.i)] = token
+
+            continue
+
+        if dependency == "root" and _looks_imperative_predicate(
+            token
+        ):
+            predicates[int(token.i)] = token
+
+            continue
+
+        if dependency not in {
+            "conj",
+            "xcomp",
+            "ccomp",
+            "advcl",
+            "dep",
+        }:
+            continue
+
+        if not _is_predicate_verb_token(token):
+            continue
+
+        head = getattr(token, "head", None)
+
+        if head is None:
+            continue
+
+        if not (
+            _is_predicate_verb_token(head)
+            or _looks_imperative_predicate(head)
+        ):
+            continue
+
+        predicates[int(token.i)] = token
+
+    return [
+        predicates[index]
+        for index in sorted(predicates)
+    ]
+
+
+def _has_coordinated_objects(
+    predicate_verbs: list[Any],
+) -> bool:
+    object_dependencies = {
+        "dobj",
+        "obj",
+        "pobj",
+        "attr",
+    }
+
+    for verb in predicate_verbs:
+        for child in getattr(
+            verb,
+            "children",
+            [],
+        ):
+            dependency = str(
+                getattr(child, "dep_", "")
+            ).lower()
+
+            if dependency not in object_dependencies:
+                continue
+
+            if list(getattr(child, "conjuncts", [])):
+                return True
+
+    return False
 
 
 def _classify_planning_mode(
@@ -137,14 +260,8 @@ def _classify_planning_mode(
 
     signals: list[str] = []
 
-    action_verbs = ACTION_VERB_PATTERN.findall(
-        normalized_message
-    )
-
-    action_verb_count = len(action_verbs)
-
-    if action_verb_count == 0:
-        signals.append("no_action_verbs")
+    if INTENT_NLP is None:
+        signals.append("nlp_unavailable")
 
         return (
             "follow_up_required",
@@ -152,9 +269,29 @@ def _classify_planning_mode(
             signals,
         )
 
-    if action_verb_count > 1:
+    doc = INTENT_NLP(normalized_message)
+
+    predicate_verbs = _extract_predicate_verbs(
+        doc
+    )
+
+    predicate_count = len(predicate_verbs)
+
+    if predicate_count == 0:
+        signals.append("no_predicate_verbs")
+
+        return (
+            "follow_up_required",
+            "low",
+            signals,
+        )
+
+    if predicate_count > 1:
         signals.append(
-            f"multiple_action_verbs:{action_verb_count}"
+            (
+                "multiple_root_or_conj_verbs:"
+                f"{predicate_count}"
+            )
         )
 
         return (
@@ -163,23 +300,11 @@ def _classify_planning_mode(
             signals,
         )
 
-    for pattern in MULTI_CONNECTOR_PATTERNS:
-        if pattern.search(normalized_message):
-            signals.append(
-                "multi_connector_detected"
-            )
-
-            return (
-                "follow_up_required",
-                "high",
-                signals,
-            )
-
-    if MULTI_QUANTIFIER_PATTERN.search(
-        normalized_message
+    if _has_coordinated_objects(
+        predicate_verbs
     ):
         signals.append(
-            "multi_quantifier_detected"
+            "coordinated_objects_detected"
         )
 
         return (

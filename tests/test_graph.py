@@ -256,6 +256,51 @@ async def test_resume_close_cad_document_reports_closed_count(
 
 
 @pytest.mark.asyncio
+async def test_close_all_open_documents_uses_single_action_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_action = ActionRequiredResult(
+        status="action_required",
+        action=CloseCadDocumentAction.model_validate(
+            {
+                "action": "close_cad_document",
+                "arguments": {"targetMode": "all"},
+            }
+        ),
+    )
+
+    fake_planner = _patch_planner(
+        monkeypatch,
+        [close_action, _SEQUENCE_COMPLETE],
+    )
+
+    pending = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message=(
+            "cool, can you please close all the open documents "
+            "which are open?"
+        ),
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending["actionId"],
+            success=True,
+            data={
+                "closedDocuments": [
+                    "6328629.CATPart",
+                    "Product1.CATProduct",
+                ]
+            },
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert fake_planner.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_resume_create_cad_document_reports_new_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -670,7 +715,10 @@ async def test_sequence_is_capped_at_max_actions_per_run(
 
     pending = await start_catia_agent(
         session_id=session_id,
-        user_message="Open several documents.",
+        user_message=(
+            "Open one document, then open another, "
+            "then open a third one."
+        ),
     )
 
     for _ in range(2):
