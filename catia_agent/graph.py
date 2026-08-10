@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -132,6 +133,8 @@ CATIA_INTENT_LEMMAS = {
     "get",
     "list",
 }
+
+CATIA_INTENT_WORD_RE = re.compile(r"[a-z]+")
 
 
 def _is_predicate_verb_token(
@@ -273,6 +276,24 @@ def _count_expected_catia_actions(
     return count
 
 
+def _count_expected_catia_actions_lexical(
+    user_message: str,
+) -> int:
+    normalized_message = user_message.casefold()
+
+    words = CATIA_INTENT_WORD_RE.findall(
+        normalized_message
+    )
+
+    matched_intent_words = {
+        word
+        for word in words
+        if word in CATIA_INTENT_LEMMAS
+    }
+
+    return len(matched_intent_words)
+
+
 def _extract_predicate_count_signal(
     signals: list[str],
 ) -> int | None:
@@ -330,6 +351,13 @@ def _classify_planning_mode(
         )
     )
 
+    if expected_action_count == 0:
+        expected_action_count = (
+            _count_expected_catia_actions_lexical(
+                normalized_message
+            )
+        )
+
     if expected_action_count > 0:
         signals.append(
             (
@@ -355,6 +383,23 @@ def _classify_planning_mode(
         )
 
     if predicate_count > 1:
+        if (
+            expected_action_count == 1
+            and not _has_coordinated_objects(
+                predicate_verbs
+            )
+        ):
+            signals.append(
+                "mixed_predicates_single_catia_intent"
+            )
+
+            return (
+                "single_action_fast_path",
+                "medium",
+                signals,
+                expected_action_count,
+            )
+
         signals.append(
             (
                 "multiple_root_or_conj_verbs:"

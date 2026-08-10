@@ -2,7 +2,11 @@ from uuid import uuid4
 
 import pytest
 
-from catia_agent.graph import resume_catia_agent, start_catia_agent
+from catia_agent.graph import (
+    _classify_planning_mode,
+    resume_catia_agent,
+    start_catia_agent,
+)
 from catia_agent.models import (
     ActionExecutionResultRequest,
     ActionRequiredResult,
@@ -73,6 +77,95 @@ def _open_action_result() -> ActionRequiredResult:
             }
         ),
     )
+
+
+class _FakeToken:
+    def __init__(
+        self,
+        *,
+        index: int,
+        lemma: str,
+        dependency: str,
+        head: "_FakeToken | None" = None,
+    ) -> None:
+        self.i = index
+        self.lemma_ = lemma
+        self.dep_ = dependency
+        self.pos_ = "VERB"
+        self.tag_ = "VB"
+        self.head = head if head is not None else self
+        self.children: list[_FakeToken] = []
+        self.conjuncts: list[_FakeToken] = []
+
+
+def _fake_doc_with_two_predicates(
+    first_lemma: str,
+    second_lemma: str,
+) -> list[_FakeToken]:
+    root = _FakeToken(
+        index=0,
+        lemma=first_lemma,
+        dependency="root",
+    )
+    conj = _FakeToken(
+        index=1,
+        lemma=second_lemma,
+        dependency="conj",
+        head=root,
+    )
+
+    root.conjuncts = [conj]
+
+    return [root, conj]
+
+
+def test_classify_planning_mode_mixed_verbs_single_catia_intent_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_doc = _fake_doc_with_two_predicates(
+        "need",
+        "load",
+    )
+
+    monkeypatch.setattr(
+        "catia_agent.graph.INTENT_NLP",
+        lambda _: fake_doc,
+    )
+
+    mode, confidence, signals, expected_count = (
+        _classify_planning_mode(
+            "I need to load bom details of a part and create seat belt assembly."
+        )
+    )
+
+    assert mode == "single_action_fast_path"
+    assert confidence == "medium"
+    assert "mixed_predicates_single_catia_intent" in signals
+    assert expected_count == 1
+
+
+def test_classify_planning_mode_true_multi_action_stays_follow_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_doc = _fake_doc_with_two_predicates(
+        "open",
+        "close",
+    )
+
+    monkeypatch.setattr(
+        "catia_agent.graph.INTENT_NLP",
+        lambda _: fake_doc,
+    )
+
+    mode, confidence, _, expected_count = (
+        _classify_planning_mode(
+            "Open the document and close it."
+        )
+    )
+
+    assert mode == "follow_up_required"
+    assert confidence == "high"
+    assert expected_count == 2
 
 
 # ---------------------------------------------------------
