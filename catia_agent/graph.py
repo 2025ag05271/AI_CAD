@@ -1136,6 +1136,65 @@ def record_action_result_node(
         "planning_expected_actions"
     )
 
+    planning_mode_signals = state.get(
+        "planning_mode_signals",
+        [],
+    )
+
+    is_medium_confidence = (
+        state.get("planning_mode_confidence")
+        == "medium"
+    )
+
+    if (
+        is_single_fast_path
+        and is_medium_confidence
+        and is_first_successful_action
+        and action_name == "start_model"
+        and expected_action_count == 1
+        and "mixed_predicates_single_catia_intent"
+        in planning_mode_signals
+    ):
+        logger.info(
+            "planner_followup_skipped_single_action",
+            extra={
+                "runId": state["run_id"],
+                "selectedTool": action_name,
+                "planningModeSignals": planning_mode_signals,
+            },
+        )
+
+        final_message = _join_completed_messages(
+            completed_actions
+        )
+
+        final_response = {
+            "status": "completed",
+            "sessionId": state["session_id"],
+            "runId": state["run_id"],
+            "actionId": expected_action_id,
+            "message": final_message,
+            "data": result.data,
+            "completedActions": (
+                _serialize_completed_actions(
+                    completed_actions
+                )
+            ),
+        }
+
+        return {
+            "completed_actions": completed_actions,
+            "sequence_progress": [],
+            "planner_result": None,
+            "pending_action": None,
+            "action_result": None,
+            "final_response": final_response,
+            "messages": _record_conversation_turn(
+                state,
+                final_message,
+            ),
+        }
+
     is_high_confidence_follow_up = (
         state.get("planning_mode")
         == "follow_up_required"

@@ -14,7 +14,8 @@ then resumes the workflow with the execution result.
 The Python backend does not execute CATIA COM automation. CATIA operations
 remain in the external .NET application.
 
-The current model provider is a local Ollama installation hosting Qwen3.
+The current model provider is a local Ollama installation hosting Gemma 4
+(`gemma4:latest`).
 The planner is isolated behind a provider-neutral `ToolCallingModelClient`
 protocol so an Azure implementation can replace it without changing the
 graph, MCP catalog, API contracts, or validation policy. See Sections 4
@@ -38,7 +39,7 @@ LangGraph workflow
     |                       +--> Descriptions
     |                       +--> JSON input schemas
     |
-    +--> ToolCallingModelClient --> Ollama :11434 --> Qwen3 4B (today)
+    +--> ToolCallingModelClient --> Ollama :11434 --> Gemma 4 (today)
     |                                                    |
     |                                                    +--> Native tool call
     |
@@ -66,7 +67,7 @@ completed or execution_failed response
 - **ToolCallingModelClient** is a provider-neutral interface. Today it is
   implemented by `OllamaToolCallingModelClient`; an Azure implementation can
   replace it without changes to the rest of the codebase.
-- **Ollama and Qwen3** provide the current local tool-calling model.
+- **Ollama and Gemma 4** provide the current local tool-calling model.
 - **Pydantic** validates API payloads, orchestrator and executor tool
   calls, CATIA context, and external execution results.
 - **The .NET client** remains the final executor and calls the CATIA COM
@@ -98,7 +99,7 @@ All development services are bound to loopback addresses. In production
 - spaCy
 - Ollama Python client
 - Ollama for Windows
-- Qwen3 4B (current model)
+- Gemma 4 (`gemma4:latest`) (current model)
 
 Environment setup used for development:
 
@@ -194,7 +195,7 @@ CATIA_AGENT_MAX_SESSION_ID_CHARACTERS=128
 CATIA_AGENT_MAX_REQUEST_ID_CHARACTERS=128
 
 CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
-CATIA_AGENT_OLLAMA_MODEL=qwen3:4b
+CATIA_AGENT_OLLAMA_MODEL=gemma4:latest
 CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS=60
 CATIA_AGENT_MODEL_TEMPERATURE=0
 
@@ -609,13 +610,25 @@ anything) from the original request still remains:
 
 Before the first planning call, the graph also performs a deterministic,
 zero-model-cost request-shape classification powered by spaCy dependency
-parsing. The classifier analyzes syntactic predicates (ROOT and coordinated
-verb predicates), conjunction structure, and coordinated objects to decide
-whether the message is likely a single action or a compound request. If the
-message is a high-confidence single CATIA action request, a fast path is
-enabled and the graph finalizes immediately after that first successful
+parsing, with a lexical fallback for CATIA action lemmas. The classifier
+analyzes syntactic predicates (ROOT and coordinated verb predicates),
+conjunction structure, and coordinated objects to decide whether the message
+is likely a single action or a compound request.
+
+If the message is a high-confidence single CATIA action request, a fast path
+is enabled and the graph finalizes immediately after that first successful
 action without issuing a follow-up planner call. If the request is compound
 or uncertain, the existing follow-up planning loop is used.
+
+When a message has mixed predicates but only one CATIA intent, the classifier
+can emit `single_action_fast_path` with medium confidence and signal
+`mixed_predicates_single_catia_intent`.
+
+If that signal is present, exactly one CATIA action slot is expected, and
+the selected action is `start_model`, the run now short-circuits after the
+first successful action without issuing the follow-up planner pass. This
+avoids unnecessary duplicate-action retries on single-intent start-model
+requests phrased with auxiliary or mixed verbs.
 
 1. `plan_action` runs, the model proposes one action, it executes.
 2. On success, `record_action_result` appends the action's structured
@@ -693,7 +706,7 @@ Every follow-up planning call after a successful action is given a
 actions already completed are listed with their exact arguments, and the
 model is asked to compare the two and either select the single next
 remaining CATIA action or call `complete_request`. Small local models
-like Qwen 3B do not always obey this framing, which is why the
+do not always obey this framing, which is why the
 duplicate-action guard (with corrective retry) and the silent-model
 recovery above are enforced deterministically in the graph rather than
 left as prompt hints alone. See `catia_agent/graph.py` and
@@ -863,7 +876,10 @@ download_cad            Prepare downloading a CAD document from PLM/Enovia.
                         Accepts either (partNumber + partRevision) or
                         partTitle, with optional documentType and savePath.
 start_model             Prepare launching an approved CATIA start model.
-                        Requires outsystemsId, modelType and savePath.
+                        Requires modelType and family-specific identifiers.
+                        SAB/DU require outsystemsId + afisNumber;
+                        customName is optional for SAB/DU.
+                        SEATBELT requires partNumber + partRevision.
 ```
 
 `download_cad` is the single approved tool for user intents such as
@@ -892,16 +908,18 @@ is always included in the action arguments returned to .NET.
 
 `start_model` supports these model families and aliases:
 
-- `SAB`: `side airbag`, `airbag`
+- `SAB`: `side airbag`, `airbag`, `softcover`, `hardcover`, `wireharness`
 - `DU`: `driver unit`, `steering wheel`
 - `SEATBELT`: `seatbelt`, `buckle`
 
-`SAB` and `DU` use `outsystemsId`. The user may refer to it as
-Outsystems ID, AO ID, or simply ID.
+`SAB` and `DU` require `outsystemsId` and `afisNumber`.
+`customName` is optional for `SAB` and `DU`.
+The user may refer to `outsystemsId` as Outsystems ID, AO ID, or simply ID.
 
 `SEATBELT` does not use `outsystemsId`. It requires `partNumber` and
-`partRevision` instead. The accepted seatbelt part-number shape is a
-PLM-style identifier plus trailing letter, for example `674089800A` or
+`partRevision` instead, and must not include `afisNumber` or `customName`.
+The accepted seatbelt part-number shape is a 9- or 10-digit numeric body
+plus trailing letter (optionally `X`-prefixed), for example `674089800A` or
 `6687874100A`, or an `X`-prefixed version such as `X6565654500A`.
 Non-`X` seatbelt part numbers use revisions like `00` or `01`.
 `X`-prefixed seatbelt part numbers require a hyphenated revision such as

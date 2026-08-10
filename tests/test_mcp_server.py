@@ -261,11 +261,13 @@ async def test_start_model_accepts_alias_and_id() -> None:
             {
                 "modelType": "side airbag",
                 "outsystemsId": "AO-2245",
+                "afisNumber": "AFIS-1001",
             },
         )
 
     assert result.data["action"] == "start_model"
     assert result.data["arguments"]["outsystemsId"] == "AO-2245"
+    assert result.data["arguments"]["afisNumber"] == "AFIS-1001"
     assert result.data["arguments"]["modelType"] == "SAB"
 
 

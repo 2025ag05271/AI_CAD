@@ -398,6 +398,57 @@ async def test_close_all_open_documents_uses_single_action_fast_path(
 
 
 @pytest.mark.asyncio
+async def test_mixed_predicates_single_intent_medium_confidence_skips_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_model_action = _start_model_action_result()
+
+    fake_planner = _patch_planner(
+        monkeypatch,
+        [start_model_action, _SEQUENCE_COMPLETE],
+    )
+
+    # Force the initial planning-mode classification to match
+    # mixed predicates with one CATIA intent.
+    monkeypatch.setattr(
+        "catia_agent.graph._classify_planning_mode",
+        lambda _message: (
+            "single_action_fast_path",
+            "medium",
+            [
+                "expected_catia_actions:1",
+                "mixed_predicates_single_catia_intent",
+            ],
+            1,
+        ),
+    )
+
+    pending = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message=(
+            "Please load seatbelt assembly for this part and revision."
+        ),
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending["actionId"],
+            success=True,
+            data={
+                "success_message": (
+                    "SEATBELT model started successfully."
+                )
+            },
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert len(result["completedActions"]) == 1
+    assert fake_planner.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_resume_create_cad_document_reports_new_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -442,6 +493,7 @@ def _start_model_action_result() -> ActionRequiredResult:
                 "action": "start_model",
                 "arguments": {
                     "outsystemsId": "2245",
+                    "afisNumber": "AFIS-1001",
                     "modelType": "SAB",
                 },
             }

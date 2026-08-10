@@ -56,7 +56,7 @@ OUTSYSTEMS_ID_RE = re.compile(
 )
 
 START_MODEL_PART_NUMBER_RE = re.compile(
-    r"^(?:\d{9}[A-Z]|X\d{9}[A-Z])$"
+    r"^(?:\d{9,10}[A-Z]|X\d{9,10}[A-Z])$"
 )
 
 

@@ -257,12 +257,14 @@ def test_start_model_accepts_side_airbag_alias() -> None:
             "action": "start_model",
             "arguments": {
                 "outsystemsId": "2245",
+                "afisNumber": "AFIS-1001",
                 "modelType": "side airbag",
             },
         }
     )
 
     assert action.arguments.outsystemsId == "2245"
+    assert action.arguments.afisNumber == "AFIS-1001"
     assert action.arguments.modelType == "SAB"
 
 
@@ -272,11 +274,13 @@ def test_start_model_accepts_steering_wheel_alias() -> None:
             "action": "start_model",
             "arguments": {
                 "outsystemsId": "AO-2245",
+                "afisNumber": "AFIS-2201",
                 "modelType": "steering wheel",
             },
         }
     )
 
+    assert action.arguments.afisNumber == "AFIS-2201"
     assert action.arguments.modelType == "DU"
 
 
