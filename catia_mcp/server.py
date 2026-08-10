@@ -409,6 +409,8 @@ def start_model(
     *,
     modelType: str,
     outsystemsId: str | None = None,
+    afisNumber: str | None = None,
+    customName: str | None = None,
     partNumber: str | None = None,
     partRevision: str | None = None,
     savePath: str | None = None,
@@ -418,7 +420,7 @@ def start_model(
 
     Supported start model families:
 
-    - SAB (also called side airbag or airbag): requires outsystemsId
+    - SAB (also called side airbag or airbag or softcover or hardcover or wireharness): requires outsystemsId
     - DU (also called driver unit or steering wheel): requires outsystemsId
     - SEATBELT (also called buckle): requires partNumber + partRevision
 
@@ -432,11 +434,14 @@ def start_model(
 
     Args:
         outsystemsId: Outsystems/AO identifier for SAB or DU requests.
+        afisNumber: AFIS number for only SAB or DU requests. This is mandatory arg.
+        customName: Custom assembly name for only SAB or DU requests. This is optional.
         partNumber: Seatbelt start-model part number.
         partRevision: Seatbelt start-model revision.
         modelType: Requested start model family or alias.
         Save location:
             - savePath is optional.
+            - This applies for all start model families.
             - If omitted, default is C:\\Temp.
             - If provided, it must be an absolute Windows path.
     """
@@ -445,14 +450,18 @@ def start_model(
         normalized_outsystems_id,
         normalized_part_number,
         normalized_part_revision,
+        normalized_afis_number,
+        normalized_custom_name,
         normalized_model_type,
         normalized_save_path
     ) = validate_start_model_inputs(
         outsystems_id=outsystemsId,
         model_type=modelType,
         part_number=partNumber,
+        afis_number=afisNumber,
+        custom_name=customName,
         part_revision=partRevision,
-        save_path=savePath
+        save_path=savePath,
     )
 
     return create_executor_action(
@@ -460,6 +469,8 @@ def start_model(
         arguments={
             "outsystemsId": normalized_outsystems_id,
             "partNumber": normalized_part_number,
+            "afisNumber": normalized_afis_number,
+            "customName": normalized_custom_name,
             "partRevision": normalized_part_revision,
             "modelType": normalized_model_type,
             "savePath": normalized_save_path,

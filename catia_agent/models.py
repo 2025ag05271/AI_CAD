@@ -178,6 +178,8 @@ class DownloadCadArguments(InternalModel):
 
 class StartModelArguments(InternalModel):
     outsystemsId: NonEmptyString | None = None
+    afisNumber: NonEmptyString | None = None
+    customName: NonEmptyString | None = None
     partNumber: NonEmptyString | None = None
     partRevision: NonEmptyString | None = None
     savePath: NonEmptyString | None = None
@@ -191,14 +193,18 @@ class StartModelArguments(InternalModel):
             normalized_outsystems_id,
             normalized_part_number,
             normalized_part_revision,
+            normalized_afis_number,
+            normalized_custom_name,
             normalized_model_type,
-            normalized_save_path
+            normalized_save_path,
         ) = validate_start_model_inputs(
             outsystems_id=self.outsystemsId,
             model_type=self.modelType,
             part_number=self.partNumber,
+            afis_number=self.afisNumber,
+            custom_name=self.customName,
             part_revision=self.partRevision,
-            save_path=self.savePath
+            save_path=self.savePath,
         )
 
         object.__setattr__(
@@ -217,6 +223,18 @@ class StartModelArguments(InternalModel):
             self,
             "partRevision",
             normalized_part_revision,
+        )
+
+        object.__setattr__(
+            self,
+            "afisNumber",
+            normalized_afis_number,
+        )
+
+        object.__setattr__(
+            self,
+            "customName",
+            normalized_custom_name,
         )
 
         object.__setattr__(

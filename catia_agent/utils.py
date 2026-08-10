@@ -267,9 +267,19 @@ def validate_start_model_inputs(
     outsystems_id: str | None,
     model_type: str,
     part_number: str | None,
+    afis_number: str | None,
+    custom_name: str | None,
     part_revision: str | None,
     save_path: str | None,
-) -> tuple[str | None, str | None, str | None, str, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str,
+    str,
+]:
     normalized_model_type = normalize_start_model_type(
         model_type
     )
@@ -290,6 +300,26 @@ def validate_start_model_inputs(
     )
     normalized_part_number = (
         normalized_part_number or None
+    )
+    
+    normalized_afis_number = (
+        afis_number.strip()
+        if afis_number is not None
+        else None
+    )
+    
+    normalized_afis_number = (
+        normalized_afis_number or None
+    )
+    
+    normalized_custom_name = (
+        custom_name.strip()
+        if custom_name is not None
+        else None
+    )
+    
+    normalized_custom_name = (
+        normalized_custom_name or None
     )
 
     normalized_part_revision = (
@@ -325,7 +355,10 @@ def validate_start_model_inputs(
         )
 
     if normalized_model_type in {"SAB", "DU"}:
-        if normalized_part_number is not None or normalized_part_revision is not None:
+        if (
+            normalized_part_number is not None
+            or normalized_part_revision is not None
+        ):
             raise ValueError(
                 "partNumber and partRevision are not used for this start model."
             )
@@ -335,8 +368,22 @@ def validate_start_model_inputs(
                 "outsystemsId is required for SAB and DU start models."
             )
 
+        if normalized_afis_number is None:
+            raise ValueError(
+                "afisNumber is required for SAB and DU start models."
+            )
+
         if len(normalized_outsystems_id) > 50:
             raise ValueError("outsystemsId is too long.")
+
+        if len(normalized_afis_number) > 50:
+            raise ValueError("afisNumber is too long.")
+
+        if (
+            normalized_custom_name is not None
+            and len(normalized_custom_name) > 200
+        ):
+            raise ValueError("customName is too long.")
 
         if not OUTSYSTEMS_ID_RE.fullmatch(
             normalized_outsystems_id
@@ -349,8 +396,10 @@ def validate_start_model_inputs(
             normalized_outsystems_id,
             None,
             None,
+            normalized_afis_number,
+            normalized_custom_name,
             normalized_model_type,
-            str(save_path_object)
+            str(save_path_object),
         )
 
     if normalized_model_type == "SEATBELT":
@@ -359,7 +408,20 @@ def validate_start_model_inputs(
                 "outsystemsId is not used for SEATBELT start models."
             )
 
-        if normalized_part_number is None or normalized_part_revision is None:
+        if normalized_afis_number is not None:
+            raise ValueError(
+                "afisNumber is not used for SEATBELT start models."
+            )
+
+        if normalized_custom_name is not None:
+            raise ValueError(
+                "customName is not used for SEATBELT start models."
+            )
+
+        if (
+            normalized_part_number is None
+            or normalized_part_revision is None
+        ):
             raise ValueError(
                 "partNumber and partRevision are required for SEATBELT start models."
             )
@@ -395,8 +457,10 @@ def validate_start_model_inputs(
             None,
             normalized_part_number,
             normalized_part_revision,
+            None,
+            None,
             normalized_model_type,
-            str(save_path_object)
+            str(save_path_object),
         )
 
     raise ValueError(
