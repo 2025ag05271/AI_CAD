@@ -278,7 +278,6 @@ class AzureFoundryReadinessCheck:
                 response = await self._client.post(
                     self._chat_completions_url,
                     json={
-                        "model": self._deployment_name,
                         "messages": [
                             {
                                 "role": "user",

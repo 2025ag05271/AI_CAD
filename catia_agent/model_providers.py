@@ -161,10 +161,14 @@ class AzureFoundryToolCallingModelClient:
         api_version: str,
         timeout_seconds: float,
         temperature: float,
+        max_tokens: int,
+        enable_thinking: bool,
     ) -> None:
         self._deployment_name = deployment_name
         self._temperature = temperature
         self._timeout_seconds = timeout_seconds
+        self._max_tokens = max_tokens
+        self._enable_thinking = enable_thinking
 
         self._chat_completions_url = (
             f"{endpoint.rstrip('/')}/chat/completions"
@@ -186,11 +190,17 @@ class AzureFoundryToolCallingModelClient:
         tools: list[dict[str, Any]],
     ) -> Any:
         payload = {
-            "model": self._deployment_name,
             "messages": messages,
             "tools": tools,
             "tool_choice": "required",
             "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+            # Qwen/vLLM-specific: suppresses the large chain-of-thought
+            # "reasoning" field the model otherwise emits alongside the
+            # tool call (see model_providers.py module notes).
+            "chat_template_kwargs": {
+                "enable_thinking": self._enable_thinking,
+            },
         }
 
         try:
@@ -295,6 +305,10 @@ def build_model_client(
                 .azure_foundry_request_timeout_seconds
             ),
             temperature=application_settings.model_temperature,
+            max_tokens=application_settings.azure_foundry_max_tokens,
+            enable_thinking=(
+                application_settings.azure_foundry_enable_thinking
+            ),
         )
 
     return OllamaToolCallingModelClient(

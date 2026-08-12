@@ -197,6 +197,23 @@ class Settings(BaseSettings):
         le=600,
     )
 
+    # Sent as max_tokens on every chat-completions request. Some Azure
+    # AI Foundry deployments truncate or misbehave without an explicit
+    # value, so this is not left to the API's own default.
+    azure_foundry_max_tokens: int = Field(
+        default=2048,
+        ge=16,
+        le=32_768,
+    )
+
+    # Qwen's vLLM chat template exposes a "thinking" mode that emits a
+    # separate, very large chain-of-thought "reasoning" field alongside
+    # the tool call, burning a large share of max_tokens and adding
+    # latency for no planning benefit (the system prompt already
+    # forbids reasoning/free-form text). Sent as
+    # chat_template_kwargs.enable_thinking; default off.
+    azure_foundry_enable_thinking: bool = False
+
     # ------------------------------------------------------------------
     # CATIA MCP server
     # ------------------------------------------------------------------

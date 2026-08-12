@@ -219,6 +219,8 @@ CATIA_AGENT_AZURE_FOUNDRY_API_KEY=
 CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME=qwen3.6-27b-instruct
 CATIA_AGENT_AZURE_FOUNDRY_API_VERSION=2024-05-01-preview
 CATIA_AGENT_AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS=60
+CATIA_AGENT_AZURE_FOUNDRY_MAX_TOKENS=2048
+CATIA_AGENT_AZURE_FOUNDRY_ENABLE_THINKING=false
 
 CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
 CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
@@ -901,13 +903,33 @@ Qwen 3.6 27B hosted on Azure AI Foundry
 chat-completions request to `{CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT}/chat/completions`
 over `httpx.AsyncClient`, authenticated with
 `Authorization: Bearer {CATIA_AGENT_AZURE_FOUNDRY_API_KEY}`, and sets
-`tool_choice: "required"`. Unlike Ollama, this structurally forces the
-model to return a tool call on every well-formed request, which removes
-one whole failure mode (`MODEL_RETURNED_NO_DECISION` on the very first
-planning pass) that the small local model was prone to. HTTP failures
-raise `AzureFoundryRequestError` (a `ModelProviderError` subclass, so no
-new API error code is introduced) and timeouts raise
+`tool_choice: "required"` plus `max_tokens` from
+`CATIA_AGENT_AZURE_FOUNDRY_MAX_TOKENS`. The request body deliberately
+omits a `model` field: the deployment is already resolved by the
+endpoint URL for this single-model serverless deployment, and some
+Azure AI Foundry deployments reject an unexpected `model` value in the
+body. `azure_foundry_deployment_name` is still required in settings —
+it is used for logs, the `/ready` diagnostic payload, and
+`active_model_name`, just not sent on the wire. Unlike Ollama, forcing
+`tool_choice: "required"` structurally forces the model to return a
+tool call on every well-formed request, which removes one whole failure
+mode (`MODEL_RETURNED_NO_DECISION` on the very first planning pass)
+that the small local model was prone to. HTTP failures raise
+`AzureFoundryRequestError` (a `ModelProviderError` subclass, so no new
+API error code is introduced) and timeouts raise
 `ModelProviderTimeoutError`, exactly like the Ollama client.
+
+The payload also sets `chat_template_kwargs.enable_thinking` from
+`CATIA_AGENT_AZURE_FOUNDRY_ENABLE_THINKING` (default `false`). The vLLM
+deployment behind this model is a reasoning model: with thinking left
+on, every response carries a very large `reasoning` field alongside
+`tool_calls`, burning a large share of `max_tokens` on chain-of-thought
+that is never read (the system prompt already forbids reasoning/free-form
+output) and materially increasing latency and truncation risk. This
+field, when present, is safely ignored — `select_tool` only reads
+`message.tool_calls`, and `_extract_tool_call` already parses
+`function.arguments` whether the provider sends it as a JSON object
+(Ollama) or a JSON-encoded string (this vLLM deployment).
 
 `build_model_client(settings)` selects and constructs the concrete client
 based on `CATIA_AGENT_MODEL_PROVIDER`; the result is exposed as the

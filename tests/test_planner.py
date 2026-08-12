@@ -368,6 +368,47 @@ async def test_plan_catia_action_returns_action_required(
 
 
 @pytest.mark.asyncio
+async def test_plan_catia_action_parses_json_string_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Azure AI Foundry's vLLM deployment returns arguments as a
+    # JSON-encoded string (plus extra fields like "reasoning" and
+    # "refusal"), not a JSON object, unlike Ollama.
+    fake_response = {
+        "message": {
+            "content": "",
+            "refusal": None,
+            "tool_calls": [
+                {
+                    "id": "chatcmpl-tool-9761220fc49a4cf1",
+                    "type": "function",
+                    "function": {
+                        "name": "request_clarification",
+                        "arguments": (
+                            '{"question": "What type of document?", '
+                            '"missingField": "documentType"}'
+                        ),
+                    },
+                }
+            ],
+            "reasoning": "The user is asking two things...",
+        }
+    }
+
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        AsyncMock(return_value=fake_response),
+    )
+
+    result = await plan_catia_action(
+        user_command="Can you please open a new document?",
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "documentType"
+
+
+@pytest.mark.asyncio
 async def test_plan_catia_action_returns_non_agentic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
