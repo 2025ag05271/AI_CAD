@@ -1,18 +1,24 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from pathlib import PureWindowsPath
-from typing import Any, Protocol
+from typing import Any
 
-import ollama
 from pydantic import ValidationError
 
 from catia_agent.config import settings
 from catia_agent.logging_config import get_logger
 from catia_agent.mcp_tools import (
     load_ollama_tools_from_mcp,
+)
+from catia_agent.model_providers import (
+    MODEL_NAME,
+    ModelProviderError,
+    ModelProviderTimeoutError,
+    ModelResponseFormatError,
+    ToolCallingModelClient,
+    model_client,
 )
 from catia_agent.models import (
     ActionRequiredResult,
@@ -39,124 +45,14 @@ from catia_agent.models import (
 
 logger = get_logger(__name__)
 
-MODEL_NAME = settings.ollama_model
-
-
-# -------------------------------------------------------------------------
-# Exceptions
-# -------------------------------------------------------------------------
-
-class ModelProviderError(RuntimeError):
-    """
-    Base exception for model-provider failures.
-    """
-
-
-class ModelProviderTimeoutError(
-    ModelProviderError
-):
-    """
-    Raised when the configured model does not respond in time.
-    """
-
-
-class ModelResponseFormatError(
-    ModelProviderError
-):
-    """
-    Raised when the model provider returns an unreadable response.
-    """
-
-
-# -------------------------------------------------------------------------
-# Model-provider abstraction
-# -------------------------------------------------------------------------
-
-class ToolCallingModelClient(Protocol):
-    """
-    Provider-neutral interface used by the CATIA planner.
-
-    A future Azure implementation can implement this protocol without
-    changing the graph, MCP catalog, or planner policy.
-    """
-
-    async def select_tool(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-    ) -> Any:
-        ...
-
-
-class OllamaToolCallingModelClient:
-    """
-    Current local Ollama implementation.
-    """
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model_name: str,
-        timeout_seconds: float,
-        temperature: float,
-    ) -> None:
-        self._model_name = model_name
-        self._timeout_seconds = timeout_seconds
-        self._temperature = temperature
-
-        self._client = ollama.AsyncClient(
-            host=base_url
-        )
-
-    async def select_tool(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-    ) -> Any:
-        try:
-            async with asyncio.timeout(
-                self._timeout_seconds
-            ):
-                return await self._client.chat(
-                    model=self._model_name,
-                    messages=messages,
-                    tools=tools,
-                    think=False,
-                    options={
-                        "temperature": (
-                            self._temperature
-                        ),
-                    },
-                )
-
-        except TimeoutError as exc:
-            raise ModelProviderTimeoutError(
-                "The model did not respond within "
-                f"{self._timeout_seconds} seconds."
-            ) from exc
-
-
-model_client: ToolCallingModelClient = (
-    OllamaToolCallingModelClient(
-        base_url=settings.ollama_base_url,
-        model_name=settings.ollama_model,
-        timeout_seconds=(
-            settings.ollama_request_timeout_seconds
-        ),
-        temperature=settings.model_temperature,
-    )
-)
-
-# Backward-compatible alias for tests and legacy call sites that patch
-# the raw Ollama client's chat method.
-ollama_client = getattr(
-    model_client,
-    "_client",
-    None,
-)
+__all__ = [
+    "MODEL_NAME",
+    "ModelProviderError",
+    "ModelProviderTimeoutError",
+    "ModelResponseFormatError",
+    "ToolCallingModelClient",
+    "model_client",
+]
 
 
 # -------------------------------------------------------------------------
@@ -450,6 +346,29 @@ def _extract_tool_call(
         )
 
     return tool_name, arguments
+
+
+def _safe_tool_call_names(
+    tool_calls: list[Any],
+) -> list[str]:
+    """
+    Best-effort tool-name extraction for diagnostic logging only.
+
+    Never raises: a malformed entry is reported as "unreadable" rather
+    than interrupting the (already-erroring) multi-tool-call log line.
+    """
+
+    names: list[str] = []
+
+    for tool_call in tool_calls:
+        try:
+            tool_name, _ = _extract_tool_call(tool_call)
+            names.append(tool_name)
+
+        except ModelResponseFormatError:
+            names.append("unreadable")
+
+    return names
 
 
 # -------------------------------------------------------------------------
@@ -771,26 +690,59 @@ def _build_system_prompt() -> str:
         "CATIA engineering assistant.\n\n"
         "You must select exactly one available tool for every user "
         "message. Never answer the user directly and never return "
-        "free-form text instead of a tool call.\n\n"
+        "free-form text instead of a tool call. A tool call is "
+        "mandatory on every turn: there is no option to respond with "
+        "no tool call, so when you are not confident that a CATIA "
+        "operation is being requested right now, select "
+        "route_to_general_chat rather than guessing a CATIA tool. "
+        "Selecting a CATIA execution tool for a conversational message "
+        "is a worse outcome than routing it to chat, because it can "
+        "trigger a real CATIA action the user did not ask for.\n\n"
+        "You must return exactly one tool call in this response, even "
+        "if you can see that more than one CATIA action will "
+        "eventually be needed. Select only the single next action now; "
+        "you will be asked again after it completes (see the "
+        "goal-delta guidance below for follow-up turns).\n\n"
+        "Step 1: decide whether this message requires executing a "
+        "CATIA operation (agentic) or not (chat). Step 2: if agentic, "
+        "select the single CATIA tool for the next remaining action. "
+        "If not agentic, select the correct orchestrator tool.\n\n"
         "Select a CATIA MCP tool only when the user is asking to "
         "perform an operation supported by that tool.\n\n"
         "Select route_to_general_chat for greetings, explanations, "
         "informational questions, capability questions, hypothetical "
-        "questions, and requests that do not require executing a "
-        "CATIA operation.\n\n"
+        "questions, opinions, ambiguous messages, and any request that "
+        "does not clearly require executing a CATIA operation. This is "
+        "the default, safe choice whenever you are unsure.\n\n"
         "Select request_clarification when the intended CATIA action "
         "is supported but required information is missing or "
         "ambiguous.\n\n"
         "Select report_unsupported_catia_action when the user clearly "
         "requests execution of a CATIA operation but no approved "
         "CATIA tool can perform it.\n\n"
-        "Distinguish questions from commands. For example, 'How do I "
-        "close a document?' is informational and must be routed to "
-        "general chat, while 'Close the active document' is an "
-        "execution request.\n\n"
+        "Distinguish questions from commands using the verb mood, not "
+        "just keyword overlap with a tool name. Examples:\n"
+        "- 'How do I close a document?' -> informational -> "
+        "route_to_general_chat.\n"
+        "- 'What does open_cad_document do?' -> informational -> "
+        "route_to_general_chat.\n"
+        "- 'Close the active document.' -> execution -> "
+        "close_cad_document.\n"
+        "- 'Can you open Gearbox.CATProduct for me?' -> a polite "
+        "request phrased as a question is still execution -> "
+        "open_cad_document.\n\n"
+        "A message can mention a CATIA capability without asking to "
+        "run it now (for example, describing a future plan, asking "
+        "for advice, or asking whether something is possible). Only "
+        "select a CATIA tool when the user wants that operation "
+        "performed as part of this turn.\n\n"
         "Do not invent document names, paths, selections, or other "
         "arguments. Resolve pronouns and ordinal references only from "
-        "trusted CATIA context and conversation history.\n\n"
+        "trusted CATIA context and conversation history. If a message "
+        "mixes a question and a command (for example, 'What is open "
+        "right now, and can you also close it?'), resolve only the "
+        "execution part on this turn and select the CATIA tool for "
+        "it; the question part is not answered by you.\n\n"
         "For compound requests, select only the next remaining CATIA "
         "action. Actions already completed for the current request "
         "must not be repeated.\n\n"
@@ -1032,11 +984,27 @@ async def plan_catia_action(
         )
 
     if len(tool_calls) != 1:
+        # Qwen 3.6 27B natively supports multi-tool-call completions and
+        # may emit more than one call more often than the earlier small
+        # model did. This is intentionally rejected rather than queued:
+        # each CATIA action requires a real round trip to the .NET
+        # executor (action_required -> await_action_result ->
+        # record_action_result) before the next action can be safely
+        # chosen, since a later action may depend on an earlier one's
+        # result. Accepting multiple calls per turn would require
+        # executing them out of order or guessing which one to run
+        # first, so the deterministic sequential loop in graph.py stays
+        # the source of truth for multi-action requests (see README
+        # Section 8.2), and this path only logs and reports a planning
+        # error for monitoring how often it happens.
         logger.error(
             "model_returned_multiple_decisions",
             extra={
                 "model": MODEL_NAME,
                 "toolCallCount": len(
+                    tool_calls
+                ),
+                "selectedTools": _safe_tool_call_names(
                     tool_calls
                 ),
                 "durationMs": duration_ms,

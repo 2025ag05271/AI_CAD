@@ -14,12 +14,14 @@ then resumes the workflow with the execution result.
 The Python backend does not execute CATIA COM automation. CATIA operations
 remain in the external .NET application.
 
-The current model provider is a local Ollama installation hosting Gemma 4
-(`gemma4:latest`).
-The planner is isolated behind a provider-neutral `ToolCallingModelClient`
-protocol so an Azure implementation can replace it without changing the
-graph, MCP catalog, API contracts, or validation policy. See Sections 4
-and 9.
+The model provider is selected by `CATIA_AGENT_MODEL_PROVIDER` and
+implemented behind a provider-neutral `ToolCallingModelClient` protocol
+(see `catia_agent/model_providers.py`), so switching providers never
+changes the graph, MCP catalog, API contracts, or validation policy.
+Local development defaults to a local Ollama installation; the intended
+production provider is Qwen 3.6 27B hosted on Azure AI Foundry, reached
+over an OpenAI-compatible chat-completions endpoint with bearer-token
+authentication. See Sections 4 and 9.
 
 ## 2. High-level architecture
 
@@ -39,7 +41,8 @@ LangGraph workflow
     |                       +--> Descriptions
     |                       +--> JSON input schemas
     |
-    +--> ToolCallingModelClient --> Ollama :11434 --> Gemma 4 (today)
+    +--> ToolCallingModelClient --> Ollama :11434 (dev)
+    |                            --> Azure AI Foundry (prod) --> Qwen 3.6 27B
     |                                                    |
     |                                                    +--> Native tool call
     |
@@ -64,10 +67,13 @@ completed or execution_failed response
   completion of Agent runs.
 - **MCP server** is the authoritative catalog of approved CATIA executor
   tool names, descriptions, and argument schemas.
-- **ToolCallingModelClient** is a provider-neutral interface. Today it is
-  implemented by `OllamaToolCallingModelClient`; an Azure implementation can
-  replace it without changes to the rest of the codebase.
-- **Ollama and Gemma 4** provide the current local tool-calling model.
+- **ToolCallingModelClient** is a provider-neutral interface implemented
+  by `OllamaToolCallingModelClient` (local development) and
+  `AzureFoundryToolCallingModelClient` (Qwen 3.6 27B on Azure AI
+  Foundry); `CATIA_AGENT_MODEL_PROVIDER` selects which one is wired up,
+  with no changes to the rest of the codebase.
+- **Ollama** provides the local development tool-calling model.
+  **Azure AI Foundry** provides the production tool-calling model.
 - **Pydantic** validates API payloads, orchestrator and executor tool
   calls, CATIA context, and external execution results.
 - **The .NET client** remains the final executor and calls the CATIA COM
@@ -78,10 +84,14 @@ completed or execution_failed response
 ```text
 FastAPI Agent API    http://127.0.0.1:8000
 CATIA MCP server     http://127.0.0.1:8001/mcp
-Ollama API           http://127.0.0.1:11434
+Ollama API           http://127.0.0.1:11434 (CATIA_AGENT_MODEL_PROVIDER=ollama)
 FastAPI Swagger      http://127.0.0.1:8000/docs
 FastAPI OpenAPI      http://127.0.0.1:8000/openapi.json
 ```
+
+When `CATIA_AGENT_MODEL_PROVIDER=azure_foundry`, the model endpoint is
+the configured `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT` instead of the local
+Ollama URL; there is no fixed local port for it.
 
 All development services are bound to loopback addresses. In production
 `enable_api_docs` is disabled by policy (see Section 6), and `/docs`,
@@ -96,10 +106,10 @@ All development services are bound to loopback addresses. In production
 - Pydantic 2
 - Pydantic Settings
 - FastMCP
-- spaCy
+- httpx (Azure AI Foundry HTTP client)
 - Ollama Python client
-- Ollama for Windows
-- Gemma 4 (`gemma4:latest`) (current model)
+- Ollama for Windows (local development)
+- Qwen 3.6 27B on Azure AI Foundry (production model)
 
 Environment setup used for development:
 
@@ -114,9 +124,10 @@ Typical dependencies:
 python -m pip install ollama pydantic pydantic-settings
 python -m pip install fastapi "uvicorn[standard]" langgraph
 python -m pip install "fastmcp>=3.4,<4"
-python -m pip install spacy
-python -m spacy download en_core_web_sm
+python -m pip install httpx
 ```
+
+spaCy is no longer a dependency (see Section 8.2).
 
 ## 5. Project structure
 
@@ -139,6 +150,7 @@ catia-agent-poc/
 |   |-- graph.py
 |   |-- logging_config.py
 |   |-- mcp_tools.py
+|   |-- model_providers.py
 |   |-- models.py
 |   |-- planner.py
 |   |-- readiness.py
@@ -154,6 +166,7 @@ catia-agent-poc/
 |   |-- test_health_api.py
 |   |-- test_mcp_server.py
 |   |-- test_mcp_tools.py
+|   |-- test_model_providers.py
 |   |-- test_models.py
 |   |-- test_planner.py
 |   |-- test_readiness.py
@@ -194,10 +207,18 @@ CATIA_AGENT_MAX_USER_MESSAGE_CHARACTERS=10000
 CATIA_AGENT_MAX_SESSION_ID_CHARACTERS=128
 CATIA_AGENT_MAX_REQUEST_ID_CHARACTERS=128
 
+CATIA_AGENT_MODEL_PROVIDER=ollama
+CATIA_AGENT_MODEL_TEMPERATURE=0
+
 CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
 CATIA_AGENT_OLLAMA_MODEL=gemma4:latest
 CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS=60
-CATIA_AGENT_MODEL_TEMPERATURE=0
+
+CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT=
+CATIA_AGENT_AZURE_FOUNDRY_API_KEY=
+CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME=qwen3.6-27b-instruct
+CATIA_AGENT_AZURE_FOUNDRY_API_VERSION=2024-05-01-preview
+CATIA_AGENT_AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS=60
 
 CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
 CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
@@ -224,6 +245,16 @@ CATIA_AGENT_ADMIN_API_KEY=
 - Settings are cached for the life of the Python process. Restart the
   application after changing environment variables.
 - Do not hard-code model names or service URLs across modules.
+- `CATIA_AGENT_MODEL_PROVIDER` defaults to `ollama` so a fresh checkout
+  keeps working without any Azure credentials configured. Switch it to
+  `azure_foundry` only after `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`,
+  `CATIA_AGENT_AZURE_FOUNDRY_API_KEY`, and
+  `CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME` are filled in;
+  `Settings.validate_model_provider_configuration` fails fast at startup
+  if `azure_foundry` is selected while any of those three are empty.
+- `CATIA_AGENT_AZURE_FOUNDRY_API_KEY` is a bearer token, stored as a
+  Pydantic `SecretStr` and included in the logging redaction list; never
+  print or log it directly.
 
 ### Environment policy
 
@@ -609,20 +640,38 @@ outcome added to the conversation context, so it can decide what (if
 anything) from the original request still remains:
 
 Before the first planning call, the graph also performs a deterministic,
-zero-model-cost request-shape classification powered by spaCy dependency
-parsing, with a lexical fallback for CATIA action lemmas. The classifier
-analyzes syntactic predicates (ROOT and coordinated verb predicates),
-conjunction structure, and coordinated objects to decide whether the message
-is likely a single action or a compound request.
+zero-model-cost, dependency-free request-shape classification (see
+`_classify_planning_mode` in `catia_agent/graph.py`). This previously used
+a spaCy dependency-parse classifier; it was replaced with a lightweight
+lexical classifier because spaCy added a ~30MB model download and
+non-trivial per-process load time without being meaningfully more
+reliable for this narrow job. The classifier splits the message on
+sequence connectors ("then", "after that", "followed by", "next", ";",
+"and") and checks whether each resulting clause opens with a CATIA action
+verb (after stripping conversational filler such as "please", "can you",
+"I need to"), rather than doing full part-of-speech tagging.
+This classifier is not the ask-vs-agent decision maker; that decision is
+made exclusively by the model, via tool selection between
+route_to_general_chat and a CATIA tool (see Section 8.1 and the system
+prompt in `catia_agent/planner.py`). It only supplies a cheap, cautious
+signal for whether the follow-up planning loop below can be skipped after
+the first action succeeds.
 
 If the message is a high-confidence single CATIA action request, a fast path
 is enabled and the graph finalizes immediately after that first successful
 action without issuing a follow-up planner call. If the request is compound
-or uncertain, the existing follow-up planning loop is used.
+or uncertain, the existing follow-up planning loop is used. Because the
+classifier is deliberately conservative, uncertain or multi-verb messages
+default to the follow-up loop; the Azure-hosted Qwen 3.6 27B model is
+materially more reliable than the earlier small local model at obeying the
+goal-delta follow-up prompting (see below), so leaning on that loop more
+often is now a good trade rather than a latency risk. The duplicate-action
+guard and silent-model recovery described later in this section are the
+real deterministic safety net and do not depend on classifier accuracy.
 
-When a message has mixed predicates but only one CATIA intent, the classifier
-can emit `single_action_fast_path` with medium confidence and signal
-`mixed_predicates_single_catia_intent`.
+When a message has more than one clause but only one clause opens with a
+CATIA verb, the classifier can emit `single_action_fast_path` with medium
+confidence and signal `mixed_predicates_single_catia_intent`.
 
 If that signal is present, exactly one CATIA action slot is expected, and
 the selected action is `start_model`, the run now short-circuits after the
@@ -695,11 +744,11 @@ Six things can end the sequence early:
   point.
 - **Expected-action exhaustion short-circuit.** For high-confidence
   `follow_up_required` requests, the graph computes expected CATIA action
-  slots from the initial spaCy predicate analysis. After each successful
-  action, if completed action count has reached that expected count, the
-  run finalizes directly as `completed` without an extra planner call for
-  `complete_request`. This reduces latency on compound requests that are
-  already fully satisfied.
+  slots from the initial lexical clause classification. After each
+  successful action, if completed action count has reached that expected
+  count, the run finalizes directly as `completed` without an extra
+  planner call for `complete_request`. This reduces latency on compound
+  requests that are already fully satisfied.
 
 Every follow-up planning call after a successful action is given a
 "goal-delta" system message: the original user request is quoted, the
@@ -824,7 +873,7 @@ Conceptual tool schema:
 ```
 
 The planner talks to the model through a provider-neutral
-`ToolCallingModelClient` protocol (see `catia_agent/planner.py`):
+`ToolCallingModelClient` protocol (see `catia_agent/model_providers.py`):
 
 ```python
 class ToolCallingModelClient(Protocol):
@@ -836,12 +885,35 @@ class ToolCallingModelClient(Protocol):
     ) -> Any: ...
 ```
 
-`OllamaToolCallingModelClient` is the current implementation. It wraps
-`ollama.AsyncClient`, applies `CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS`
-via `asyncio.timeout`, and raises `ModelProviderTimeoutError` on timeout.
-An Azure implementation only needs to implement `select_tool` and be
-assigned to the module-level `model_client`; nothing else in the graph,
-MCP layer, or API contracts changes.
+Every implementation normalizes its provider-specific response into the
+same shape (an object or dict exposing `message.tool_calls`, each tool
+call exposing `function.name` / `function.arguments`) so `planner.py`
+never branches on provider.
+
+`OllamaToolCallingModelClient` wraps `ollama.AsyncClient`, applies
+`CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS` via `asyncio.timeout`, and
+raises `ModelProviderTimeoutError` on timeout. It is used for local
+development (`CATIA_AGENT_MODEL_PROVIDER=ollama`).
+
+`AzureFoundryToolCallingModelClient` is the production implementation for
+Qwen 3.6 27B hosted on Azure AI Foundry
+(`CATIA_AGENT_MODEL_PROVIDER=azure_foundry`). It POSTs an OpenAI-compatible
+chat-completions request to `{CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT}/chat/completions`
+over `httpx.AsyncClient`, authenticated with
+`Authorization: Bearer {CATIA_AGENT_AZURE_FOUNDRY_API_KEY}`, and sets
+`tool_choice: "required"`. Unlike Ollama, this structurally forces the
+model to return a tool call on every well-formed request, which removes
+one whole failure mode (`MODEL_RETURNED_NO_DECISION` on the very first
+planning pass) that the small local model was prone to. HTTP failures
+raise `AzureFoundryRequestError` (a `ModelProviderError` subclass, so no
+new API error code is introduced) and timeouts raise
+`ModelProviderTimeoutError`, exactly like the Ollama client.
+
+`build_model_client(settings)` selects and constructs the concrete client
+based on `CATIA_AGENT_MODEL_PROVIDER`; the result is exposed as the
+module-level `model_client`. A future third provider only needs to
+implement `select_tool` and be added to that factory — nothing else in
+the graph, MCP layer, or API contracts changes.
 
 The model selects a tool. It never executes it. The application validates
 the tool call and, for CATIA executor tools, returns it to the .NET
@@ -1108,6 +1180,10 @@ ollama_request_failed
 ollama_readiness_timed_out
 ollama_readiness_failed
 ollama_model_unavailable
+azure_foundry_request_failed
+azure_foundry_readiness_timed_out
+azure_foundry_readiness_failed
+azure_foundry_readiness_rejected
 mcp_approved_tools_missing
 planner_duplicate_action_detected
 planner_duplicate_retry_recovered

@@ -4,6 +4,7 @@ import asyncio
 import time
 from typing import Any, Protocol
 
+import httpx
 import ollama
 
 from catia_agent.config import settings
@@ -78,6 +79,9 @@ class OllamaReadinessCheck:
     @property
     def name(self) -> str:
         return "modelProvider"
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
     async def check(
         self,
@@ -219,6 +223,153 @@ class OllamaReadinessCheck:
 
 
 # -------------------------------------------------------------------------
+# Azure AI Foundry readiness
+# -------------------------------------------------------------------------
+
+class AzureFoundryReadinessCheck:
+    """
+    Verify that the configured Azure AI Foundry model endpoint is
+    reachable and accepts authenticated requests.
+
+    A minimal, single-token chat-completion request is used because
+    Azure AI Foundry Models-as-a-Service deployments do not expose a
+    stable model-listing endpoint; this exercises the exact path the
+    planner depends on (auth, deployment name, connectivity).
+    """
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        api_key: str,
+        deployment_name: str,
+        api_version: str,
+        timeout_seconds: float,
+    ) -> None:
+        self._deployment_name = deployment_name
+        self._timeout_seconds = timeout_seconds
+
+        self._chat_completions_url = (
+            f"{endpoint.rstrip('/')}/chat/completions"
+        )
+
+        self._client = httpx.AsyncClient(
+            timeout=timeout_seconds,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            params={"api-version": api_version},
+        )
+
+    @property
+    def name(self) -> str:
+        return "modelProvider"
+
+    async def check(
+        self,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+
+        try:
+            async with asyncio.timeout(
+                self._timeout_seconds
+            ):
+                response = await self._client.post(
+                    self._chat_completions_url,
+                    json={
+                        "model": self._deployment_name,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "ping",
+                            }
+                        ],
+                        "max_tokens": 1,
+                    },
+                )
+
+        except TimeoutError:
+            duration_ms = _duration_ms(started_at)
+
+            logger.warning(
+                "azure_foundry_readiness_timed_out",
+                extra={
+                    "timeoutSeconds": self._timeout_seconds,
+                    "durationMs": duration_ms,
+                },
+            )
+
+            return {
+                "status": "unavailable",
+                "service": "azure_foundry",
+                "message": (
+                    "The Azure AI Foundry model endpoint did "
+                    "not respond within the configured timeout."
+                ),
+                "durationMs": duration_ms,
+            }
+
+        except httpx.HTTPError as exc:
+            duration_ms = _duration_ms(started_at)
+
+            logger.warning(
+                "azure_foundry_readiness_failed",
+                extra={
+                    "durationMs": duration_ms,
+                    "exceptionType": type(exc).__name__,
+                },
+            )
+
+            result: dict[str, Any] = {
+                "status": "unavailable",
+                "service": "azure_foundry",
+                "message": (
+                    "The Azure AI Foundry model endpoint could "
+                    "not be reached."
+                ),
+                "durationMs": duration_ms,
+            }
+
+            if settings.include_technical_details_in_errors:
+                result["technicalDetail"] = str(exc)
+
+            return result
+
+        duration_ms = _duration_ms(started_at)
+
+        if response.status_code >= 400:
+            logger.warning(
+                "azure_foundry_readiness_rejected",
+                extra={
+                    "statusCode": response.status_code,
+                    "durationMs": duration_ms,
+                },
+            )
+
+            return {
+                "status": "unavailable",
+                "service": "azure_foundry",
+                "model": self._deployment_name,
+                "message": (
+                    "The Azure AI Foundry model endpoint "
+                    f"returned HTTP {response.status_code}."
+                ),
+                "durationMs": duration_ms,
+            }
+
+        return {
+            "status": "available",
+            "service": "azure_foundry",
+            "model": self._deployment_name,
+            "durationMs": duration_ms,
+        }
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
+# -------------------------------------------------------------------------
 # MCP readiness
 # -------------------------------------------------------------------------
 
@@ -345,18 +496,83 @@ class McpReadinessCheck:
         }
         
         
+_cached_model_provider_readiness_check: ReadinessCheck | None = None
+
+
+def _build_model_provider_readiness_check() -> ReadinessCheck:
+    """
+    Build (or reuse) the readiness check for the currently configured
+    model provider only. Checking an inactive provider would report a
+    misleading dependency failure.
+
+    The result is cached at module scope so repeated /ready calls reuse
+    the same underlying HTTP client instead of opening a new one (and
+    leaking the old one) on every request.
+    """
+
+    global _cached_model_provider_readiness_check
+
+    if _cached_model_provider_readiness_check is not None:
+        return _cached_model_provider_readiness_check
+
+    if settings.model_provider == "azure_foundry":
+        assert settings.azure_foundry_endpoint is not None
+        assert settings.azure_foundry_api_key is not None
+        assert settings.azure_foundry_deployment_name is not None
+
+        check: ReadinessCheck = AzureFoundryReadinessCheck(
+            endpoint=settings.azure_foundry_endpoint,
+            api_key=(
+                settings.azure_foundry_api_key.get_secret_value()
+            ),
+            deployment_name=(
+                settings.azure_foundry_deployment_name
+            ),
+            api_version=settings.azure_foundry_api_version,
+            timeout_seconds=(
+                settings.azure_foundry_request_timeout_seconds
+            ),
+        )
+
+    else:
+        check = OllamaReadinessCheck(
+            base_url=settings.ollama_base_url,
+            model_name=settings.ollama_model,
+            timeout_seconds=(
+                settings.ollama_request_timeout_seconds
+            ),
+        )
+
+    _cached_model_provider_readiness_check = check
+    return check
+
+
+async def close_model_provider_readiness_check() -> None:
+    """
+    Release the cached readiness check's HTTP client, if any.
+
+    Called from app.py's lifespan shutdown hook.
+    """
+
+    global _cached_model_provider_readiness_check
+
+    check = _cached_model_provider_readiness_check
+    _cached_model_provider_readiness_check = None
+
+    aclose = getattr(check, "aclose", None)
+
+    if aclose is not None:
+        await aclose()
+
+
 async def get_readiness_report() -> dict[str, Any]:
     """
     Run all dependency readiness checks concurrently and return
     the combined application readiness status.
     """
 
-    ollama_readiness_check = OllamaReadinessCheck(
-        base_url=settings.ollama_base_url,
-        model_name=settings.ollama_model,
-        timeout_seconds=(
-            settings.ollama_request_timeout_seconds
-        ),
+    model_provider_readiness_check = (
+        _build_model_provider_readiness_check()
     )
 
     mcp_readiness_check = McpReadinessCheck()
@@ -364,7 +580,7 @@ async def get_readiness_report() -> dict[str, Any]:
     started_at = time.perf_counter()
 
     checks: tuple[ReadinessCheck, ...] = (
-        ollama_readiness_check,
+        model_provider_readiness_check,
         mcp_readiness_check,
     )
 

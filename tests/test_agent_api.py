@@ -3,10 +3,20 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app import app
-from catia_agent.graph import AgentRunStateConflictError
+from catia_agent.config import settings
+from catia_agent.graph import (
+    AgentRunNotFoundError,
+    AgentRunStateConflictError,
+)
 
 
 client = TestClient(app)
+
+AGENT_RUNS_URL = f"{settings.api_prefix}/agent/runs"
+
+
+def _action_results_url(run_id: str) -> str:
+    return f"{AGENT_RUNS_URL}/{run_id}/action-results"
 
 
 def test_start_agent_run_returns_action_required() -> None:
@@ -28,7 +38,7 @@ def test_start_agent_run_returns_action_required() -> None:
         new=AsyncMock(return_value=fake_response),
     ) as mocked_agent:
         response = client.post(
-            "/api/agent/runs",
+            AGENT_RUNS_URL,
             json={
                 "sessionId": "pytest-session-001",
                 "message": "Open C:\\TestData\\Gearbox.CATProduct",
@@ -56,7 +66,7 @@ def test_start_agent_run_returns_non_agentic() -> None:
         new=AsyncMock(return_value=fake_response),
     ):
         response = client.post(
-            "/api/agent/runs",
+            AGENT_RUNS_URL,
             json={
                 "sessionId": "pytest-session-001",
                 "message": "What is the capital of France?",
@@ -69,7 +79,7 @@ def test_start_agent_run_returns_non_agentic() -> None:
 
 def test_start_agent_run_requires_session_id() -> None:
     response = client.post(
-        "/api/agent/runs",
+        AGENT_RUNS_URL,
         json={"message": "What is the active CATIA document?"},
     )
 
@@ -78,7 +88,7 @@ def test_start_agent_run_requires_session_id() -> None:
 
 def test_start_agent_run_requires_message() -> None:
     response = client.post(
-        "/api/agent/runs",
+        AGENT_RUNS_URL,
         json={"sessionId": "pytest-session-001"},
     )
 
@@ -87,7 +97,7 @@ def test_start_agent_run_requires_message() -> None:
 
 def test_invalid_catia_context_is_rejected() -> None:
     response = client.post(
-        "/api/agent/runs",
+        AGENT_RUNS_URL,
         json={
             "sessionId": "pytest-session-001",
             "message": "What is the active CATIA document?",
@@ -112,7 +122,7 @@ def test_start_agent_run_maps_pending_action_to_409() -> None:
         ),
     ):
         response = client.post(
-            "/api/agent/runs",
+            AGENT_RUNS_URL,
             json={
                 "sessionId": "pytest-session-001",
                 "message": "Open the gearbox.",
@@ -126,7 +136,11 @@ def test_start_agent_run_maps_pending_action_to_409() -> None:
     )
 
 
-def test_start_agent_run_maps_generic_value_error_to_400() -> None:
+def test_start_agent_run_maps_generic_value_error_to_500() -> None:
+    # ValueError -> 400/ACTION_VALIDATION_FAILED was removed; an
+    # unexpected ValueError now falls through the request middleware's
+    # generic handler as 500/INTERNAL_SERVER_ERROR (see README_Python.md
+    # Section 7, "Codes ... no longer produced").
     with patch(
         "app.start_catia_agent",
         new=AsyncMock(
@@ -136,17 +150,17 @@ def test_start_agent_run_maps_generic_value_error_to_400() -> None:
         ),
     ):
         response = client.post(
-            "/api/agent/runs",
+            AGENT_RUNS_URL,
             json={
                 "sessionId": "pytest-session-001",
                 "message": "Open the gearbox.",
             },
         )
 
-    assert response.status_code == 400
+    assert response.status_code == 500
     assert (
         response.json()["detail"]["errorCode"]
-        == "ACTION_VALIDATION_FAILED"
+        == "INTERNAL_SERVER_ERROR"
     )
 
 
@@ -161,6 +175,9 @@ def test_submit_successful_action_result() -> None:
             "documentName": "Gearbox.CATProduct",
             "fullPath": "C:\\TestData\\Gearbox.CATProduct",
         },
+        # ActionCompletedResponse.completedActions defaults to [], so
+        # FastAPI's response_model always fills it in on "completed".
+        "completedActions": [],
     }
 
     with patch(
@@ -168,7 +185,7 @@ def test_submit_successful_action_result() -> None:
         new=AsyncMock(return_value=fake_response),
     ) as mocked_resume:
         response = client.post(
-            "/api/agent/runs/run-001/action-results",
+            _action_results_url("run-001"),
             json={
                 "actionId": "action-001",
                 "success": True,
@@ -190,11 +207,13 @@ def test_submit_action_result_run_not_found() -> None:
     with patch(
         "app.resume_catia_agent",
         new=AsyncMock(
-            side_effect=KeyError("No pending Agent run was found.")
+            side_effect=AgentRunNotFoundError(
+                "No pending Agent run was found."
+            )
         ),
     ):
         response = client.post(
-            "/api/agent/runs/missing-run/action-results",
+            _action_results_url("missing-run"),
             json={
                 "actionId": "action-001",
                 "success": True,
@@ -218,7 +237,7 @@ def test_submit_action_result_state_conflict() -> None:
         ),
     ):
         response = client.post(
-            "/api/agent/runs/run-001/action-results",
+            _action_results_url("run-001"),
             json={
                 "actionId": "action-001",
                 "success": True,
@@ -233,6 +252,10 @@ def test_submit_action_result_state_conflict() -> None:
 
 
 def test_submit_action_result_resume_failure_is_not_conflict() -> None:
+    # AGENT_RUN_RESUME_FAILED was removed; an unexpected ValueError from
+    # the resume path now falls through to 500/INTERNAL_SERVER_ERROR,
+    # distinct from the 409 state-conflict guards above (see
+    # README_Python.md Section 7, "Codes ... no longer produced").
     with patch(
         "app.resume_catia_agent",
         new=AsyncMock(
@@ -242,15 +265,15 @@ def test_submit_action_result_resume_failure_is_not_conflict() -> None:
         ),
     ):
         response = client.post(
-            "/api/agent/runs/run-001/action-results",
+            _action_results_url("run-001"),
             json={
                 "actionId": "action-001",
                 "success": True,
             },
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 500
     assert (
         response.json()["detail"]["errorCode"]
-        == "AGENT_RUN_RESUME_FAILED"
+        == "INTERNAL_SERVER_ERROR"
     )

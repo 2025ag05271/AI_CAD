@@ -94,6 +94,8 @@ _SENSITIVE_FIELD_NAMES = frozenset(
         "refreshToken",
         "password",
         "secret",
+        "azureFoundryApiKey",
+        "bearerToken",
     }
 )
 

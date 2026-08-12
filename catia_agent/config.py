@@ -4,7 +4,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,15 @@ LogLevel = Literal[
     "WARNING",
     "ERROR",
     "CRITICAL",
+]
+
+# The planner talks to whichever provider is selected here through the
+# provider-neutral ToolCallingModelClient protocol (see
+# catia_agent/model_providers.py). Nothing outside config.py and
+# model_providers.py should branch on this value.
+ModelProviderName = Literal[
+    "ollama",
+    "azure_foundry",
 ]
 
 
@@ -113,12 +122,25 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # Current model provider
+    # Model provider selection
     #
-    # These settings intentionally retain Ollama for the current
-    # implementation. The planner will later be isolated behind a model
-    # client abstraction, allowing an Azure implementation to replace it
-    # without changing the graph or API contracts.
+    # The planner is coupled to the provider-neutral
+    # ToolCallingModelClient protocol (see catia_agent/model_providers.py),
+    # not to any specific provider. This flag selects which concrete
+    # client is wired up at process start; the graph, MCP layer, and API
+    # contracts do not change based on its value.
+    # ------------------------------------------------------------------
+
+    model_provider: ModelProviderName = "ollama"
+
+    model_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+    )
+
+    # ------------------------------------------------------------------
+    # Ollama provider (local development)
     # ------------------------------------------------------------------
 
     ollama_base_url: str = (
@@ -137,10 +159,42 @@ class Settings(BaseSettings):
         le=600,
     )
 
-    model_temperature: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=2.0,
+    # ------------------------------------------------------------------
+    # Azure AI Foundry provider (cloud-hosted Qwen 3.6 27B)
+    #
+    # azure_foundry_endpoint is the base Azure AI Foundry model
+    # deployment URL, without the trailing /chat/completions path
+    # segment (for example
+    # https://<resource>.services.ai.azure.com/models). The bearer
+    # token is stored as a SecretStr so it is never rendered by repr(),
+    # str(), or accidental logging.
+    # ------------------------------------------------------------------
+
+    azure_foundry_endpoint: str | None = Field(
+        default=None,
+        max_length=2048,
+    )
+
+    azure_foundry_api_key: SecretStr | None = Field(
+        default=None,
+        max_length=4096,
+    )
+
+    azure_foundry_deployment_name: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+
+    azure_foundry_api_version: str = Field(
+        default="2024-05-01-preview",
+        min_length=1,
+        max_length=50,
+    )
+
+    azure_foundry_request_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        le=600,
     )
 
     # ------------------------------------------------------------------
@@ -313,6 +367,79 @@ class Settings(BaseSettings):
         normalized_value = value.strip()
         return normalized_value or None
 
+    @field_validator("azure_foundry_endpoint")
+    @classmethod
+    def normalize_azure_foundry_endpoint(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        normalized_value = value.strip().rstrip("/")
+
+        if not normalized_value:
+            return None
+
+        parsed_url = urlparse(normalized_value)
+
+        if parsed_url.scheme not in {"http", "https"}:
+            raise ValueError(
+                "azure_foundry_endpoint must use HTTP or HTTPS."
+            )
+
+        if not parsed_url.hostname:
+            raise ValueError(
+                "azure_foundry_endpoint must include a hostname."
+            )
+
+        return normalized_value
+
+    @field_validator("azure_foundry_deployment_name")
+    @classmethod
+    def normalize_azure_foundry_deployment_name(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        normalized_value = value.strip()
+        return normalized_value or None
+
+    @model_validator(mode="after")
+    def validate_model_provider_configuration(
+        self,
+    ) -> Settings:
+        if self.model_provider == "azure_foundry":
+            missing_fields = [
+                field_name
+                for field_name, field_value in (
+                    (
+                        "azure_foundry_endpoint",
+                        self.azure_foundry_endpoint,
+                    ),
+                    (
+                        "azure_foundry_api_key",
+                        self.azure_foundry_api_key,
+                    ),
+                    (
+                        "azure_foundry_deployment_name",
+                        self.azure_foundry_deployment_name,
+                    ),
+                )
+                if field_value is None
+            ]
+
+            if missing_fields:
+                raise ValueError(
+                    "model_provider is 'azure_foundry' but the "
+                    "following settings are not configured: "
+                    + ", ".join(missing_fields)
+                )
+
+        return self
+
     @model_validator(mode="after")
     def validate_environment_policy(
         self,
@@ -362,6 +489,20 @@ class Settings(BaseSettings):
         return (
             f"http://{self.api_host}:{self.api_port}"
         )
+
+    @property
+    def active_model_name(self) -> str:
+        """
+        Name of the model served by the currently selected provider.
+
+        Diagnostic and logging code should read this instead of
+        branching on model_provider directly.
+        """
+
+        if self.model_provider == "azure_foundry":
+            return self.azure_foundry_deployment_name or "unconfigured"
+
+        return self.ollama_model
 
 
 @lru_cache(maxsize=1)

@@ -93,211 +93,104 @@ TERMINAL_READ_ONLY_TOOLS: frozenset[str] = frozenset()
 
 _run_sessions: dict[str, str] = {}
 
-def _load_intent_nlp() -> Any | None:
-    try:
-        import spacy
 
-    except ImportError:
-        logger.warning(
-            "planning_mode_nlp_unavailable",
-            extra={
-                "reason": "spacy_not_installed",
-            },
-        )
+# -------------------------------------------------------------------------
+# Deterministic request-shape classification
+#
+# This replaces a previous spaCy dependency-parse classifier. spaCy added
+# a ~30MB model download, non-trivial per-process load time, and its
+# statistical POS tagging was not meaningfully more reliable than a
+# lexical heuristic for this narrow job. It is not the ask-vs-agent
+# decision maker: that decision is made exclusively by the model, via
+# tool selection between route_to_general_chat and a CATIA tool (see
+# _build_system_prompt in planner.py). This classifier only supplies a
+# cheap, conservative signal for whether the follow-up planning loop in
+# record_action_result_node can be skipped after the first action. Since
+# the Azure-hosted model is materially more reliable at obeying the
+# goal-delta follow-up prompting than the earlier small local model, this
+# classifier can afford to be simple and err toward "follow up required"
+# whenever it is unsure; the duplicate-action guard and silent-model
+# recovery in plan_action_node remain the deterministic safety net
+# regardless of classifier or model quality.
+# -------------------------------------------------------------------------
 
-        return None
+_CATIA_VERB_PATTERN = re.compile(
+    r"^(?:open|clos\w*|creat\w*|download\w*|start\w*|get\w*|list\w*)",
+    re.IGNORECASE,
+)
 
-    try:
-        return spacy.load("en_core_web_sm")
+_SEQUENCE_CONNECTOR_SPLIT_PATTERN = re.compile(
+    r"\b(?:then|after\s+that|afterwards|followed\s+by|next)\b|;|\band\b",
+    re.IGNORECASE,
+)
 
-    except Exception as exc:
-        logger.warning(
-            "planning_mode_nlp_unavailable",
-            extra={
-                "reason": "spacy_model_load_failed",
-                "error": str(exc),
-            },
-        )
-
-        return None
-
-
-INTENT_NLP = _load_intent_nlp()
-
-CATIA_INTENT_LEMMAS = {
-    "open",
-    "close",
-    "create",
-    "download",
-    "start",
-    "get",
-    "list",
-}
-
-CATIA_INTENT_WORD_RE = re.compile(r"[a-z]+")
-
-
-def _is_predicate_verb_token(
-    token: Any,
-) -> bool:
-    part_of_speech = str(
-        getattr(token, "pos_", "")
-    ).upper()
-
-    if part_of_speech in {"VERB", "AUX"}:
-        return True
-
-    tag = str(getattr(token, "tag_", "")).upper()
-
-    return tag.startswith("VB")
+_LEADING_FILLER_PATTERN = re.compile(
+    r"""^(?:
+        [\s,.:;!-]+
+        |cool\b
+        |okay\b|ok\b
+        |please\b
+        |kindly\b
+        |just\b
+        |now\b
+        |well\b
+        |alright\b
+        |so\b
+        |(?:can|could|would|will)\s+(?:you|i|we)?\s*(?:please\s+)?
+        |i\s+(?:want|need|would\s+like)\s+to\s+
+        |i'?d\s+like\s+to\s+
+        |let'?s\b
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
-def _looks_imperative_predicate(
-    token: Any,
-) -> bool:
-    if str(getattr(token, "dep_", "")).lower() != "root":
-        return False
+def _strip_leading_filler(
+    segment: str,
+) -> str:
+    previous_segment = None
+    current_segment = segment.strip()
 
-    object_dependencies = {
-        "dobj",
-        "obj",
-        "pobj",
-        "attr",
-    }
+    while previous_segment != current_segment:
+        previous_segment = current_segment
+        current_segment = _LEADING_FILLER_PATTERN.sub(
+            "",
+            current_segment,
+            count=1,
+        ).strip()
 
-    for child in getattr(token, "children", []):
-        dependency = str(
-            getattr(child, "dep_", "")
-        ).lower()
-
-        if dependency in object_dependencies:
-            return True
-
-    return False
+    return current_segment
 
 
-def _extract_predicate_verbs(
-    doc: Any,
-) -> list[Any]:
-    predicates: dict[int, Any] = {}
-
-    for token in doc:
-        dependency = str(
-            getattr(token, "dep_", "")
-        ).lower()
-
-        if dependency == "root" and _is_predicate_verb_token(
-            token
-        ):
-            predicates[int(token.i)] = token
-
-            continue
-
-        if dependency == "root" and _looks_imperative_predicate(
-            token
-        ):
-            predicates[int(token.i)] = token
-
-            continue
-
-        if dependency not in {
-            "conj",
-            "xcomp",
-            "ccomp",
-            "advcl",
-            "dep",
-        }:
-            continue
-
-        if not _is_predicate_verb_token(token):
-            continue
-
-        head = getattr(token, "head", None)
-
-        if head is None:
-            continue
-
-        if not (
-            _is_predicate_verb_token(head)
-            or _looks_imperative_predicate(head)
-        ):
-            continue
-
-        predicates[int(token.i)] = token
+def _split_into_clauses(
+    user_message: str,
+) -> list[str]:
+    segments = _SEQUENCE_CONNECTOR_SPLIT_PATTERN.split(
+        user_message
+    )
 
     return [
-        predicates[index]
-        for index in sorted(predicates)
+        segment
+        for segment in segments
+        if segment and segment.strip()
     ]
 
 
-def _has_coordinated_objects(
-    predicate_verbs: list[Any],
+def _clause_starts_with_catia_verb(
+    clause: str,
 ) -> bool:
-    object_dependencies = {
-        "dobj",
-        "obj",
-        "pobj",
-        "attr",
-    }
+    cleaned_clause = _strip_leading_filler(clause)
 
-    for verb in predicate_verbs:
-        for child in getattr(
-            verb,
-            "children",
-            [],
-        ):
-            dependency = str(
-                getattr(child, "dep_", "")
-            ).lower()
-
-            if dependency not in object_dependencies:
-                continue
-
-            if list(getattr(child, "conjuncts", [])):
-                return True
-
-    return False
-
-
-def _count_expected_catia_actions(
-    predicate_verbs: list[Any],
-) -> int:
-    count = 0
-
-    for token in predicate_verbs:
-        lemma = str(
-            getattr(token, "lemma_", "")
-        ).lower()
-
-        if lemma in CATIA_INTENT_LEMMAS:
-            count += 1
-
-    return count
-
-
-def _count_expected_catia_actions_lexical(
-    user_message: str,
-) -> int:
-    normalized_message = user_message.casefold()
-
-    words = CATIA_INTENT_WORD_RE.findall(
-        normalized_message
+    return (
+        _CATIA_VERB_PATTERN.match(cleaned_clause)
+        is not None
     )
-
-    matched_intent_words = {
-        word
-        for word in words
-        if word in CATIA_INTENT_LEMMAS
-    }
-
-    return len(matched_intent_words)
 
 
 def _extract_predicate_count_signal(
     signals: list[str],
 ) -> int | None:
-    prefix = "multiple_root_or_conj_verbs:"
+    prefix = "multiple_action_verbs:"
 
     for signal in signals:
         if not signal.startswith(prefix):
@@ -327,126 +220,53 @@ def _classify_planning_mode(
             None,
         )
 
-    signals: list[str] = []
+    clauses = _split_into_clauses(normalized_message)
+    has_connector = len(clauses) > 1
 
-    if INTENT_NLP is None:
-        signals.append("nlp_unavailable")
+    matched_action_count = sum(
+        1
+        for clause in clauses
+        if _clause_starts_with_catia_verb(clause)
+    )
 
+    if matched_action_count == 0:
         return (
             "follow_up_required",
             "low",
-            signals,
+            ["no_catia_verbs"],
             None,
         )
 
-    doc = INTENT_NLP(normalized_message)
-
-    predicate_verbs = _extract_predicate_verbs(
-        doc
-    )
-
-    expected_action_count = (
-        _count_expected_catia_actions(
-            predicate_verbs
-        )
-    )
-
-    if expected_action_count == 0:
-        expected_action_count = (
-            _count_expected_catia_actions_lexical(
-                normalized_message
-            )
-        )
-
-    if expected_action_count > 0:
-        signals.append(
-            (
-                "expected_catia_actions:"
-                f"{expected_action_count}"
-            )
-        )
-
-    predicate_count = len(predicate_verbs)
-
-    if predicate_count == 0:
-        signals.append("no_predicate_verbs")
-
-        return (
-            "follow_up_required",
-            "low",
-            signals,
-            (
-                expected_action_count
-                if expected_action_count > 0
-                else None
-            ),
-        )
-
-    if predicate_count > 1:
-        if (
-            expected_action_count == 1
-            and not _has_coordinated_objects(
-                predicate_verbs
-            )
-        ):
-            signals.append(
-                "mixed_predicates_single_catia_intent"
-            )
-
-            return (
-                "single_action_fast_path",
-                "medium",
-                signals,
-                expected_action_count,
-            )
-
-        signals.append(
-            (
-                "multiple_root_or_conj_verbs:"
-                f"{predicate_count}"
-            )
-        )
-
+    if matched_action_count > 1:
         return (
             "follow_up_required",
             "high",
-            signals,
-            (
-                expected_action_count
-                if expected_action_count > 0
-                else None
-            ),
+            [
+                f"expected_catia_actions:{matched_action_count}",
+                f"multiple_action_verbs:{matched_action_count}",
+            ],
+            matched_action_count,
         )
 
-    if _has_coordinated_objects(
-        predicate_verbs
-    ):
-        signals.append(
-            "coordinated_objects_detected"
-        )
-
+    if has_connector:
         return (
-            "follow_up_required",
+            "single_action_fast_path",
             "medium",
-            signals,
-            (
-                expected_action_count
-                if expected_action_count > 0
-                else None
-            ),
+            [
+                "expected_catia_actions:1",
+                "mixed_predicates_single_catia_intent",
+            ],
+            1,
         )
-
-    signals.append("single_action_fast_path")
 
     return (
         "single_action_fast_path",
         "high",
-        signals,
-        (
-            expected_action_count
-            if expected_action_count > 0
-            else None
-        ),
+        [
+            "expected_catia_actions:1",
+            "single_action_fast_path",
+        ],
+        1,
     )
 
 

@@ -43,17 +43,18 @@ from catia_agent.mcp_tools import (
     get_mcp_tool_catalog,
     get_tool_cache_status,
 )
+from catia_agent.model_providers import (
+    ModelProviderError,
+    ModelProviderTimeoutError,
+    model_client,
+)
 from catia_agent.models import (
     ActionExecutionResultRequest,
     AgentRunRequest,
     AgentRunResponse,
 )
-from catia_agent.planner import (
-    MODEL_NAME,
-    ModelProviderError,
-    ModelProviderTimeoutError,
-)
 from catia_agent.readiness import (
+    close_model_provider_readiness_check,
     get_readiness_report,
 )
 
@@ -86,10 +87,8 @@ async def lifespan(
             "version": settings.app_version,
             "environment": settings.environment,
             "apiPrefix": settings.api_prefix,
-            "model": settings.ollama_model,
-            "modelBaseUrl": (
-                settings.ollama_base_url
-            ),
+            "modelProvider": settings.model_provider,
+            "model": settings.active_model_name,
             "mcpServerUrl": (
                 settings.mcp_server_url
             ),
@@ -97,6 +96,29 @@ async def lifespan(
     )
 
     yield
+
+    model_client_aclose = getattr(
+        model_client,
+        "aclose",
+        None,
+    )
+
+    if model_client_aclose is not None:
+        try:
+            await model_client_aclose()
+
+        except Exception:
+            logger.exception(
+                "model_client_shutdown_failed"
+            )
+
+    try:
+        await close_model_provider_readiness_check()
+
+    except Exception:
+        logger.exception(
+            "readiness_check_shutdown_failed"
+        )
 
     logger.info(
         "application_stopped",
@@ -160,6 +182,39 @@ tools_router = APIRouter(
 # Error response helpers
 # -------------------------------------------------------------------------
 
+def _sanitize_for_json(
+    value: Any,
+) -> Any:
+    """
+    Recursively coerce a value into something json.dumps can encode.
+
+    Pydantic's ValidationError.errors() can embed raw exception
+    instances in ctx.error for validators that raise ValueError, which
+    are not JSON-serializable; render anything not already a plain
+    JSON type as its string form instead of letting JSONResponse crash.
+    """
+
+    if value is None or isinstance(
+        value,
+        (str, int, float, bool),
+    ):
+        return value
+
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_for_json(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            _sanitize_for_json(item)
+            for item in value
+        ]
+
+    return str(value)
+
+
 def create_error_response(
     *,
     request: Request,
@@ -189,7 +244,9 @@ def create_error_response(
 
     if validation_errors is not None:
         detail["validationErrors"] = (
-            validation_errors
+            _sanitize_for_json(
+                list(validation_errors)
+            )
         )
 
     response = JSONResponse(

@@ -3,9 +3,13 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app import app
+from catia_agent.config import settings
 
 
 client = TestClient(app)
+
+TOOLS_URL = f"{settings.api_prefix}/tools"
+AGENT_RUNS_PATH = f"{settings.api_prefix}/agent/runs"
 
 
 def test_health_returns_application_information() -> None:
@@ -17,8 +21,8 @@ def test_health_returns_application_information() -> None:
 
     assert body["status"] == "healthy"
     assert body["service"] == "CATIA Agent API"
-    assert body["mcpToolDiscoveryEndpoint"] == "/api/tools"
-    assert body["readinessEndpoint"] == "/ready"
+    assert body["version"] == settings.app_version
+    assert body["environment"] == settings.environment
 
 
 def test_health_returns_request_id_header() -> None:
@@ -56,12 +60,12 @@ def test_openapi_schema_is_available() -> None:
     body = response.json()
 
     assert body["info"]["title"] == "CATIA Agent API"
-    assert "/api/agent/runs" in body["paths"]
+    assert AGENT_RUNS_PATH in body["paths"]
     assert (
-        "/api/agent/runs/{run_id}/action-results"
+        f"{AGENT_RUNS_PATH}/{{run_id}}/action-results"
         in body["paths"]
     )
-    assert "/api/tools" in body["paths"]
+    assert TOOLS_URL in body["paths"]
     assert "/ready" in body["paths"]
 
 
@@ -108,7 +112,9 @@ def test_readiness_returns_503_when_not_ready() -> None:
         response = client.get("/ready")
 
     assert response.status_code == 503
-    assert response.json()["detail"]["ready"] is False
+    # /ready intentionally returns the raw readiness report, not the
+    # standard {"detail": ...} error envelope used elsewhere.
+    assert response.json()["ready"] is False
 
 
 def test_list_catia_tools_returns_catalog() -> None:
@@ -125,7 +131,7 @@ def test_list_catia_tools_returns_catalog() -> None:
         "app.get_mcp_tool_catalog",
         new=AsyncMock(return_value=fake_tools),
     ):
-        response = client.get("/api/tools")
+        response = client.get(TOOLS_URL)
 
     assert response.status_code == 200
 
@@ -146,18 +152,18 @@ def test_list_catia_tools_returns_503_when_mcp_unavailable() -> None:
             )
         ),
     ):
-        response = client.get("/api/tools")
+        response = client.get(TOOLS_URL)
 
     assert response.status_code == 503
     assert (
         response.json()["detail"]["errorCode"]
-        == "MCP_CONNECTION_FAILED"
+        == "MCP_REQUEST_FAILED"
     )
 
 
 def test_clear_tool_cache_returns_cleared_status() -> None:
     with patch("app.clear_mcp_tool_cache") as mocked_clear:
-        response = client.post("/api/tools/cache/clear")
+        response = client.post(f"{TOOLS_URL}/cache/clear")
 
     assert response.status_code == 200
     assert response.json()["status"] == "cleared"

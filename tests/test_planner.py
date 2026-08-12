@@ -355,7 +355,7 @@ async def test_plan_catia_action_returns_action_required(
     }
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -380,7 +380,7 @@ async def test_plan_catia_action_returns_non_agentic(
     }
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -410,7 +410,7 @@ async def test_plan_catia_action_returns_clarification_required(
     }
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -429,7 +429,7 @@ async def test_plan_catia_action_returns_unsupported_when_no_tool_call(
     fake_response = {"message": {"tool_calls": []}}
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -458,7 +458,7 @@ async def test_plan_catia_action_prefers_catia_tool_over_meta_tool(
     }
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -484,7 +484,7 @@ async def test_plan_catia_action_picks_first_when_only_meta_tools(
     }
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -507,7 +507,7 @@ async def test_plan_catia_action_trims_conversation_history(
         return {"message": {"tool_calls": []}}
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         fake_chat,
     )
 
@@ -550,7 +550,7 @@ async def test_plan_catia_action_injects_completed_actions_system_message(
         return {"message": {"tool_calls": []}}
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         fake_chat,
     )
 
@@ -592,7 +592,7 @@ async def test_plan_catia_action_no_completed_actions_message_when_empty(
         return {"message": {"tool_calls": []}}
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         fake_chat,
     )
 
@@ -619,7 +619,7 @@ async def test_plan_catia_action_no_decision_with_completed_actions_defaults_to_
     fake_response = {"message": {"tool_calls": []}}
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -645,7 +645,7 @@ async def test_plan_catia_action_no_decision_blocks_complete_for_high_confidence
     fake_response = {"message": {"tool_calls": []}}
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         AsyncMock(return_value=fake_response),
     )
 
@@ -676,7 +676,7 @@ async def test_plan_catia_action_rejects_ic_start_model_request_early(
     )
 
     monkeypatch.setattr(
-        "catia_agent.planner.ollama_client.chat",
+        "catia_agent.planner.model_client.select_tool",
         chat_mock,
     )
 
@@ -690,3 +690,46 @@ async def test_plan_catia_action_rejects_ic_start_model_request_early(
     assert result.reason == "operation_not_allowed"
     assert "IC start model" in result.message
     chat_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_logs_tool_names_on_multiple_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_response = {
+        "message": {
+            "tool_calls": [
+                _tool_call("route_to_general_chat", {}),
+                _tool_call(
+                    "open_cad_document",
+                    {"filePath": "C:\\TestData\\Gearbox.CATProduct"},
+                ),
+            ]
+        }
+    }
+
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        AsyncMock(return_value=fake_response),
+    )
+
+    with caplog.at_level("ERROR"):
+        result = await plan_catia_action(
+            user_command="Open the gearbox.",
+        )
+
+    assert result.status == "planning_error"
+
+    multi_decision_records = [
+        record
+        for record in caplog.records
+        if record.message == "model_returned_multiple_decisions"
+    ]
+
+    assert len(multi_decision_records) == 1
+    assert multi_decision_records[0].selectedTools == [
+        "route_to_general_chat",
+        "open_cad_document",
+    ]
+

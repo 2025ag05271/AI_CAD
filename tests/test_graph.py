@@ -79,62 +79,13 @@ def _open_action_result() -> ActionRequiredResult:
     )
 
 
-class _FakeToken:
-    def __init__(
-        self,
-        *,
-        index: int,
-        lemma: str,
-        dependency: str,
-        head: "_FakeToken | None" = None,
-    ) -> None:
-        self.i = index
-        self.lemma_ = lemma
-        self.dep_ = dependency
-        self.pos_ = "VERB"
-        self.tag_ = "VB"
-        self.head = head if head is not None else self
-        self.children: list[_FakeToken] = []
-        self.conjuncts: list[_FakeToken] = []
-
-
-def _fake_doc_with_two_predicates(
-    first_lemma: str,
-    second_lemma: str,
-) -> list[_FakeToken]:
-    root = _FakeToken(
-        index=0,
-        lemma=first_lemma,
-        dependency="root",
-    )
-    conj = _FakeToken(
-        index=1,
-        lemma=second_lemma,
-        dependency="conj",
-        head=root,
-    )
-
-    root.conjuncts = [conj]
-
-    return [root, conj]
-
-
-def test_classify_planning_mode_mixed_verbs_single_catia_intent_fast_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_doc = _fake_doc_with_two_predicates(
-        "need",
-        "load",
-    )
-
-    monkeypatch.setattr(
-        "catia_agent.graph.INTENT_NLP",
-        lambda _: fake_doc,
-    )
-
+def test_classify_planning_mode_mixed_verbs_single_catia_intent_fast_path() -> (
+    None
+):
     mode, confidence, signals, expected_count = (
         _classify_planning_mode(
-            "I need to load bom details of a part and create seat belt assembly."
+            "I need to load bom details of a part and create seat "
+            "belt assembly."
         )
     )
 
@@ -144,19 +95,7 @@ def test_classify_planning_mode_mixed_verbs_single_catia_intent_fast_path(
     assert expected_count == 1
 
 
-def test_classify_planning_mode_true_multi_action_stays_follow_up(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_doc = _fake_doc_with_two_predicates(
-        "open",
-        "close",
-    )
-
-    monkeypatch.setattr(
-        "catia_agent.graph.INTENT_NLP",
-        lambda _: fake_doc,
-    )
-
+def test_classify_planning_mode_true_multi_action_stays_follow_up() -> None:
     mode, confidence, _, expected_count = (
         _classify_planning_mode(
             "Open the document and close it."
@@ -166,6 +105,41 @@ def test_classify_planning_mode_true_multi_action_stays_follow_up(
     assert mode == "follow_up_required"
     assert confidence == "high"
     assert expected_count == 2
+
+
+def test_classify_planning_mode_single_command_is_high_confidence() -> None:
+    mode, confidence, _, expected_count = (
+        _classify_planning_mode(
+            "cool, can you please close all the open documents "
+            "which are open?"
+        )
+    )
+
+    assert mode == "single_action_fast_path"
+    assert confidence == "high"
+    assert expected_count == 1
+
+
+def test_classify_planning_mode_no_catia_verb_is_low_confidence() -> None:
+    mode, confidence, signals, expected_count = (
+        _classify_planning_mode("Hello there.")
+    )
+
+    assert mode == "follow_up_required"
+    assert confidence == "low"
+    assert "no_catia_verbs" in signals
+    assert expected_count is None
+
+
+def test_classify_planning_mode_empty_message() -> None:
+    mode, confidence, signals, expected_count = (
+        _classify_planning_mode("   ")
+    )
+
+    assert mode == "follow_up_required"
+    assert confidence == "low"
+    assert "empty_message" in signals
+    assert expected_count is None
 
 
 # ---------------------------------------------------------

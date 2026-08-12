@@ -15,11 +15,13 @@ The .NET layer is the final authority for CATIA execution. Neither the
 tool-calling model, LangGraph, FastAPI, nor the MCP server directly invokes
 CATIA COM.
 
-The Python backend currently uses a local Ollama-hosted Qwen3 model, but
-the planner sits behind a provider-neutral abstraction and can be replaced
-by a cloud provider (for example, Azure) without any .NET change. The
-`status`, `errorCode`, and payload contracts documented here do not depend
-on which model is in use. See the Python guide for details.
+The Python backend selects its tool-calling model provider via
+`CATIA_AGENT_MODEL_PROVIDER`: a local Ollama model for development, or
+Qwen 3.6 27B hosted on Azure AI Foundry for production. The planner sits
+behind a provider-neutral abstraction, so switching providers requires no
+.NET change. The `status`, `errorCode`, and payload contracts documented
+here do not depend on which model is in use. See the Python guide for
+details.
 
 ## 2. High-level architecture
 
@@ -1430,7 +1432,7 @@ Before validating an Agent command, confirm:
 
 ```text
 [ ] The configured model provider is available
-    (Ollama with qwen3:4b for local dev)
+    (Ollama for local dev, or Azure AI Foundry Qwen 3.6 27B in production)
 [ ] MCP server is running on 127.0.0.1:8001
 [ ] FastAPI is running on 127.0.0.1:8000
 [ ] GET /ready returns 200

@@ -4,7 +4,9 @@ import pytest
 
 import catia_agent.mcp_tools as mcp_tools
 from catia_agent.mcp_tools import (
+    McpConnectionError,
     McpToolDiscoveryError,
+    McpToolSchemaError,
     clear_mcp_tool_cache,
     convert_mcp_tool_to_ollama,
     get_tool_cache_status,
@@ -75,11 +77,12 @@ def test_convert_mcp_tool_to_ollama_defaults_missing_schema() -> None:
         "type": "object",
         "properties": {},
         "required": [],
+        "additionalProperties": False,
     }
 
 
 def test_convert_mcp_tool_to_ollama_requires_name() -> None:
-    with pytest.raises(McpToolDiscoveryError):
+    with pytest.raises(McpToolSchemaError):
         convert_mcp_tool_to_ollama(
             SimpleNamespace(name=None, description="", inputSchema={})
         )
@@ -104,15 +107,15 @@ async def test_load_ollama_tools_from_mcp_uses_cache(
 ) -> None:
     call_count = 0
 
-    async def fake_discover_mcp_tools():
+    async def fake_discover_tools():
         nonlocal call_count
         call_count += 1
         return [_fake_mcp_tool()]
 
     monkeypatch.setattr(
-        mcp_tools,
-        "discover_mcp_tools",
-        fake_discover_mcp_tools,
+        mcp_tools.tool_catalog_service,
+        "discover_tools",
+        fake_discover_tools,
     )
 
     first = await load_ollama_tools_from_mcp()
@@ -129,15 +132,15 @@ async def test_load_ollama_tools_from_mcp_force_refresh(
 ) -> None:
     call_count = 0
 
-    async def fake_discover_mcp_tools():
+    async def fake_discover_tools():
         nonlocal call_count
         call_count += 1
         return [_fake_mcp_tool()]
 
     monkeypatch.setattr(
-        mcp_tools,
-        "discover_mcp_tools",
-        fake_discover_mcp_tools,
+        mcp_tools.tool_catalog_service,
+        "discover_tools",
+        fake_discover_tools,
     )
 
     await load_ollama_tools_from_mcp()
@@ -162,7 +165,7 @@ async def test_discover_mcp_tools_wraps_connection_errors(
 
     monkeypatch.setattr(mcp_tools, "Client", FailingClient)
 
-    with pytest.raises(McpToolDiscoveryError):
+    with pytest.raises(McpConnectionError):
         await mcp_tools.discover_mcp_tools()
 
 
