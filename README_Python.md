@@ -148,6 +148,13 @@ catia-agent-poc/
 |   |-- __init__.py
 |   |-- config.py
 |   |-- graph.py
+|   |-- graph_classification.py
+|   |-- graph_completion.py
+|   |-- graph_nodes.py
+|   |-- graph_responses.py
+|   |-- graph_session.py
+|   |-- graph_state.py
+|   |-- graph_terminal.py
 |   |-- logging_config.py
 |   |-- mcp_tools.py
 |   |-- model_providers.py
@@ -549,6 +556,37 @@ fresh UUID is used so logs and headers cannot be poisoned.
 
 ## 8. LangGraph workflow
 
+The graph implementation is split across several modules so no single
+file exceeds roughly 400 lines:
+
+```text
+catia_agent/graph_state.py           CatiaAgentState, run exceptions,
+                                      TERMINAL_READ_ONLY_TOOLS
+catia_agent/graph_classification.py  the lexical planning-mode classifier
+catia_agent/graph_responses.py       response-building helpers shared by
+                                      multiple nodes
+catia_agent/graph_session.py         run/session bookkeeping
+                                      (_run_sessions, state snapshot
+                                      helpers)
+catia_agent/graph_nodes.py           plan_action_node, prepare_action_node,
+                                      await_action_result_node
+catia_agent/graph_completion.py      record_action_result_node (the
+                                      sequential multi-action bookkeeping
+                                      in Section 8.2)
+catia_agent/graph_terminal.py        prepare_sequence_completed_response_node,
+                                      prepare_terminal_response_node
+catia_agent/graph.py                 routing, graph construction, and the
+                                      public start_catia_agent /
+                                      resume_catia_agent entry points
+```
+
+`catia_agent/graph.py` re-exports `AgentRunStateConflictError`,
+`AgentRunNotFoundError`, `CatiaAgentState`, `TERMINAL_READ_ONLY_TOOLS`,
+and `get_session_id_for_run` from the modules above, so existing
+`from catia_agent.graph import ...` call sites (app.py, tests) do not
+need to know about the split. New code that only needs one of these
+should still prefer importing from `catia_agent.graph` for that reason.
+
 The compiled graph (see `catia_agent/graph.py`):
 
 ```text
@@ -702,7 +740,7 @@ Six things can end the sequence early:
   with their own status.
 - **Terminal read-only tool short-circuit.** If the action that just
   succeeded is a member of `TERMINAL_READ_ONLY_TOOLS` in
-  `catia_agent/graph.py` (currently only `get_active_document`),
+  `catia_agent/graph_state.py` (currently only `get_active_document`),
   `record_action_result` builds the `completed` response directly and
   skips the follow-up planning pass. This is logged as
   `planner_skipped_terminal_read`. Read tools answer a question with a
@@ -762,6 +800,22 @@ duplicate-action guard (with corrective retry) and the silent-model
 recovery above are enforced deterministically in the graph rather than
 left as prompt hints alone. See `catia_agent/graph.py` and
 `catia_agent/planner.py`.
+
+Follow-up calls also use a shorter, dedicated system prompt
+(`_build_followup_system_prompt` in `catia_agent/planner.py`) instead of
+the full first-turn prompt. The ask-vs-agent framing and the
+question-vs-command examples in the first-turn prompt
+(`_build_system_prompt`) only matter for deciding whether the original
+message is agentic at all; by the time a follow-up call happens, that is
+already settled, and repeating that guidance on every follow-up call is
+wasted prompt tokens on every remaining step of a compound request. The
+leaner prompt keeps only what still applies mid-sequence: exactly one
+tool call, no free-form text, and the orchestrator tools that can
+legitimately still fire (`request_clarification`,
+`report_unsupported_catia_action`, `route_to_general_chat` — see the
+mid-sequence bullet above). The goal-delta comparison itself is not
+duplicated in either prompt; it lives solely in the per-turn system
+message described above.
 
 This calls the planner multiple times (once per action) rather than
 asking the model to return several tool calls in one response. Each call
@@ -1148,7 +1202,7 @@ Examples of deterministic Python validation:
   planning pass (after ≥1 completed action) is treated as an implicit
   `complete_request` (Section 8.2).
 - Terminal read-only tool short-circuit: read tools listed in
-  `TERMINAL_READ_ONLY_TOOLS` in `catia_agent/graph.py` (currently
+  `TERMINAL_READ_ONLY_TOOLS` in `catia_agent/graph_state.py` (currently
   `get_active_document`) finalize the run as `completed` immediately
   after a successful C# result without another planner call
   (Section 8.2).
@@ -1313,7 +1367,7 @@ MCP discovery does not automatically approve a tool for execution.
 If the new tool is a **pure read** — it answers a question with a
 discrete data payload and does not naturally chain into a follow-up
 CATIA action — also add its name to `TERMINAL_READ_ONLY_TOOLS` in
-`catia_agent/graph.py`. Read tools currently in that set:
+`catia_agent/graph_state.py`. Read tools currently in that set:
 `get_active_document`. Candidates as they land: `list_open_documents`,
 `get_document_info`, `get_component_position`, `get_component_cog`.
 Write or mutating tools (`open_cad_document`, `close_cad_document`,

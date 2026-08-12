@@ -58,7 +58,7 @@ def _patch_planner(monkeypatch: pytest.MonkeyPatch, result):
     fake_plan_catia_action.call_count = 0
 
     monkeypatch.setattr(
-        "catia_agent.graph.plan_catia_action",
+        "catia_agent.graph_nodes.plan_catia_action",
         fake_plan_catia_action,
     )
 
@@ -894,7 +894,7 @@ async def test_sequence_is_capped_at_max_actions_per_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "catia_agent.graph.settings.max_actions_per_run",
+        "catia_agent.graph_nodes.settings.max_actions_per_run",
         2,
     )
 

@@ -752,6 +752,38 @@ def _build_system_prompt() -> str:
     )
 
 
+def _build_followup_system_prompt() -> str:
+    """
+    Leaner prompt used once at least one action has already completed
+    in this run.
+
+    The ask-vs-agent decision and the question-vs-command examples in
+    _build_system_prompt only matter for the first planning turn; by
+    follow-up time this request is already known to be agentic. The
+    goal-delta comparison itself (what remains, complete_request) is
+    covered by the per-turn system message built by
+    _build_completed_actions_message, so it is not repeated here.
+    """
+
+    return (
+        "You are continuing to plan CATIA actions for a request that "
+        "already has one or more completed steps in this run. Use the "
+        "goal-delta analysis below to decide what remains.\n\n"
+        "You must select exactly one available tool. Never answer the "
+        "user directly and never return free-form text instead of a "
+        "tool call.\n\n"
+        "Select request_clarification if the next remaining CATIA "
+        "action is missing required information. Select "
+        "report_unsupported_catia_action if the next remaining action "
+        "has no approved CATIA tool. Select route_to_general_chat only "
+        "if no CATIA action remains and the only thing left from the "
+        "original request is informational.\n\n"
+        "Do not invent document names, paths, selections, or other "
+        "arguments. Resolve pronouns and ordinal references only from "
+        "trusted CATIA context and conversation history.\n\n"
+    )
+
+
 # -------------------------------------------------------------------------
 # Planner
 # -------------------------------------------------------------------------
@@ -837,7 +869,11 @@ async def plan_catia_action(
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
-            "content": _build_system_prompt(),
+            "content": (
+                _build_followup_system_prompt()
+                if completed_actions
+                else _build_system_prompt()
+            ),
         },
         {
             "role": "system",

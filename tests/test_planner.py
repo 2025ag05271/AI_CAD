@@ -618,6 +618,84 @@ async def test_plan_catia_action_injects_completed_actions_system_message(
     joined = "\n".join(system_contents)
 
     assert "already completed" in joined
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_uses_initial_prompt_on_first_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    async def fake_chat(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        fake_chat,
+    )
+
+    await plan_catia_action(
+        user_command="Open the gearbox.",
+        completed_actions=None,
+    )
+
+    system_contents = [
+        m["content"]
+        for m in captured["messages"]
+        if m["role"] == "system"
+    ]
+
+    joined = "\n".join(system_contents)
+
+    assert "Step 1: decide whether" in joined
+    assert "continuing to plan CATIA actions" not in joined
+
+
+@pytest.mark.asyncio
+async def test_plan_catia_action_uses_leaner_prompt_on_followup_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    async def fake_chat(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        fake_chat,
+    )
+
+    completed = [
+        {
+            "action": "open_cad_document",
+            "arguments": {
+                "filePath": "C:\\TestData\\Gearbox.CATProduct",
+            },
+        }
+    ]
+
+    await plan_catia_action(
+        user_command="Open the gearbox, then close it.",
+        completed_actions=completed,
+    )
+
+    system_contents = [
+        m["content"]
+        for m in captured["messages"]
+        if m["role"] == "system"
+    ]
+
+    joined = "\n".join(system_contents)
+
+    assert "continuing to plan CATIA actions" in joined
+    assert "Step 1: decide whether" not in joined
+    # Orchestrator-tool guidance for mid-sequence terminal outcomes
+    # (README Section 8.2) must still be present in the leaner prompt.
+    assert "request_clarification" in joined
+    assert "report_unsupported_catia_action" in joined
+    assert "route_to_general_chat" in joined
     assert "open_cad_document" in joined
     assert "Gearbox.CATProduct" in joined
 
