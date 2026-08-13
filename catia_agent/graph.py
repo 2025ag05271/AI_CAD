@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
+from catia_agent.config import settings
 from catia_agent.graph_classification import (
     _classify_planning_mode,
 )
@@ -246,11 +247,15 @@ async def start_catia_agent(
             "run_id": run_id,
             "user_message": user_message.strip(),
             "catia_context": catia_context,
-            "messages": list(
-                existing_state.get(
-                    "messages",
-                    [],
+            "messages": (
+                list(
+                    existing_state.get(
+                        "messages",
+                        [],
+                    )
                 )
+                if settings.enable_conversation_history
+                else []
             ),
             "sequence_progress": [],
             "planning_mode": planning_mode,

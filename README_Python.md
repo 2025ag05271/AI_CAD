@@ -107,6 +107,7 @@ All development services are bound to loopback addresses. In production
 - Pydantic Settings
 - FastMCP
 - httpx (Azure AI Foundry HTTP client)
+- truststore (uses the OS certificate store for TLS verification, required behind TLS-inspecting corporate proxies)
 - Ollama Python client
 - Ollama for Windows (local development)
 - Qwen 3.6 27B on Azure AI Foundry (production model)
@@ -125,6 +126,7 @@ python -m pip install ollama pydantic pydantic-settings
 python -m pip install fastapi "uvicorn[standard]" langgraph
 python -m pip install "fastmcp>=3.4,<4"
 python -m pip install httpx
+python -m pip install truststore
 ```
 
 spaCy is no longer a dependency (see Section 8.2).
@@ -214,7 +216,7 @@ CATIA_AGENT_MAX_USER_MESSAGE_CHARACTERS=10000
 CATIA_AGENT_MAX_SESSION_ID_CHARACTERS=128
 CATIA_AGENT_MAX_REQUEST_ID_CHARACTERS=128
 
-CATIA_AGENT_MODEL_PROVIDER=ollama
+CATIA_AGENT_MODEL_PROVIDER=azure_foundry
 CATIA_AGENT_MODEL_TEMPERATURE=0
 
 CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -234,7 +236,9 @@ CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
 CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
 
 CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES=20
+CATIA_AGENT_ENABLE_CONVERSATION_HISTORY=false
 CATIA_AGENT_MAX_ACTIONS_PER_RUN=20
+CATIA_AGENT_ENABLE_MULTI_ACTION_SEQUENCES=false
 CATIA_AGENT_MAX_COMPLETED_ACTION_RESULT_BYTES=262144
 CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS=1800
 
@@ -254,16 +258,19 @@ CATIA_AGENT_ADMIN_API_KEY=
 - Settings are cached for the life of the Python process. Restart the
   application after changing environment variables.
 - Do not hard-code model names or service URLs across modules.
-- `CATIA_AGENT_MODEL_PROVIDER` defaults to `ollama` so a fresh checkout
-  keeps working without any Azure credentials configured. Switch it to
-  `azure_foundry` only after `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`,
-  `CATIA_AGENT_AZURE_FOUNDRY_API_KEY`, and
-  `CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME` are filled in;
+- `CATIA_AGENT_MODEL_PROVIDER` defaults to `azure_foundry`. This requires
+  `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`, `CATIA_AGENT_AZURE_FOUNDRY_API_KEY`,
+  and `CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME` to be filled in;
   `Settings.validate_model_provider_configuration` fails fast at startup
   if `azure_foundry` is selected while any of those three are empty.
+  Switch it to `ollama` for offline local development with no external
+  network dependency (no Azure settings required in that case).
 - `CATIA_AGENT_AZURE_FOUNDRY_API_KEY` is a bearer token, stored as a
   Pydantic `SecretStr` and included in the logging redaction list; never
   print or log it directly.
+- `CATIA_AGENT_ENABLE_CONVERSATION_HISTORY` (default `false`) and
+  `CATIA_AGENT_ENABLE_MULTI_ACTION_SEQUENCES` (default `false`) are
+  independent switches described in Section 8.2.
 
 ### Environment policy
 
@@ -672,6 +679,17 @@ by the MCP server because they are not CATIA executor tools.
 
 ### 8.2 Sequential multi-action requests
 
+`CATIA_AGENT_ENABLE_MULTI_ACTION_SEQUENCES` (default `false`) is a hard
+switch on everything described in this section. When it is `false`,
+`record_action_result_node` (see `catia_agent/graph_completion.py`)
+finalizes every run as `completed` immediately after its first
+successful action, regardless of the planning-mode classification below
+— a compound request such as "open X, then close X" only opens X and
+stops. This caps every run at exactly one planner call, so disabling it
+directly reduces model calls: a request that would otherwise need N
+follow-up planner round-trips instead needs none. Set it to `true` to
+restore the sequential behavior documented in the rest of this section.
+
 A single message can require more than one CATIA action, for example
 "open Gearbox.CATProduct and Frame.CATProduct, then close XYZ.CATPart".
 The model is not asked to enumerate every step up front. Instead, the
@@ -853,6 +871,16 @@ after every completed or terminal turn. The planner receives a trimmed
 window of this history (`CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES`)
 so it can resolve references such as "the first one" or "that document"
 against what the Agent previously said.
+
+`CATIA_AGENT_ENABLE_CONVERSATION_HISTORY` (default `false`) gates
+whether `messages` from earlier runs in the same session is carried
+into a new run at all (see `start_catia_agent` in `catia_agent/graph.py`).
+When `false`, every run starts with an empty `messages` list regardless
+of what a previous run in the same session recorded, so the planner has
+no memory of earlier turns and cannot resolve references like "the one I
+just opened" from a prior message. This does not affect
+`sequence_progress`, which is scoped to a single run and needed for that
+run's own multi-action follow-up planning regardless of this setting.
 
 `completed_actions` and `sequence_progress` exist only for the lifetime
 of one run (see Section 8.2). `completed_actions` accumulates a

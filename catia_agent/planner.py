@@ -866,21 +866,13 @@ async def plan_catia_action(
         -settings.max_conversation_history_messages:
     ]
 
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": (
-                _build_followup_system_prompt()
-                if completed_actions
-                else _build_system_prompt()
-            ),
-        },
-        {
-            "role": "system",
-            "content": build_catia_context_message(
-                catia_context
-            ),
-        },
+    system_content_parts: list[str] = [
+        (
+            _build_followup_system_prompt()
+            if completed_actions
+            else _build_system_prompt()
+        ),
+        build_catia_context_message(catia_context),
     ]
 
     completed_actions_message = (
@@ -891,21 +883,32 @@ async def plan_catia_action(
     )
 
     if completed_actions_message:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    completed_actions_message
-                ),
-            }
+        system_content_parts.append(
+            completed_actions_message
         )
+
+    # Qwen/vLLM's chat template rejects any system-role message that
+    # is not the very first message, so every system-role fragment
+    # must be merged into a single leading message instead of being
+    # sent as separate system messages.
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": "\n\n".join(
+                system_content_parts
+            ),
+        },
+    ]
 
     messages.extend(trimmed_history)
 
     if retry_hint:
+        # Role "user", not "system": this message comes after the
+        # leading system message and history, which Qwen/vLLM's chat
+        # template only allows for role "system" at index 0.
         messages.append(
             {
-                "role": "system",
+                "role": "user",
                 "content": retry_hint,
             }
         )

@@ -317,6 +317,7 @@ class AzureFoundryReadinessCheck:
                 extra={
                     "durationMs": duration_ms,
                     "exceptionType": type(exc).__name__,
+                    "exceptionMessage": str(exc),
                 },
             )
 
@@ -512,7 +513,17 @@ def _build_model_provider_readiness_check() -> ReadinessCheck:
     global _cached_model_provider_readiness_check
 
     if _cached_model_provider_readiness_check is not None:
+        logger.debug(
+            "model_provider_readiness_check_reused",
+            extra={"modelProvider": settings.model_provider},
+        )
+
         return _cached_model_provider_readiness_check
+
+    logger.info(
+        "model_provider_readiness_check_initializing",
+        extra={"modelProvider": settings.model_provider},
+    )
 
     if settings.model_provider == "azure_foundry":
         assert settings.azure_foundry_endpoint is not None
@@ -533,6 +544,15 @@ def _build_model_provider_readiness_check() -> ReadinessCheck:
             ),
         )
 
+        logger.info(
+            "model_provider_readiness_check_initialized",
+            extra={
+                "modelProvider": settings.model_provider,
+                "endpoint": settings.azure_foundry_endpoint,
+                "deploymentName": settings.azure_foundry_deployment_name,
+            },
+        )
+
     else:
         check = OllamaReadinessCheck(
             base_url=settings.ollama_base_url,
@@ -540,6 +560,15 @@ def _build_model_provider_readiness_check() -> ReadinessCheck:
             timeout_seconds=(
                 settings.ollama_request_timeout_seconds
             ),
+        )
+
+        logger.info(
+            "model_provider_readiness_check_initialized",
+            extra={
+                "modelProvider": settings.model_provider,
+                "baseUrl": settings.ollama_base_url,
+                "model": settings.ollama_model,
+            },
         )
 
     _cached_model_provider_readiness_check = check

@@ -226,12 +226,14 @@ class AzureFoundryToolCallingModelClient:
                 "azure_foundry_request_failed",
                 extra={
                     "statusCode": response.status_code,
+                    "responseBody": response.text[:2000],
                 },
             )
 
             raise AzureFoundryRequestError(
                 "The Azure AI Foundry model endpoint returned "
-                f"HTTP {response.status_code}."
+                f"HTTP {response.status_code}: "
+                f"{response.text[:2000]}"
             )
 
         try:

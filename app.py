@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# Must run before any module builds an httpx/ssl client (e.g. via
+# catia_agent.graph -> model_providers), so it patches the OS
+# certificate store into Python's ssl module in time. This is required
+# behind TLS-inspecting corporate proxies whose root CA is trusted by
+# Windows but not by Python's bundled certifi CA list.
+import truststore
+
+truststore.inject_into_ssl()
+
 import asyncio
 import hmac
 import time

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from catia_agent.config import settings
 from catia_agent.graph_classification import (
     _extract_predicate_count_signal,
 )
@@ -170,6 +171,22 @@ def record_action_result_node(
             "content": success_message,
         }
     )
+
+    if not settings.enable_multi_action_sequences:
+        logger.info(
+            "multi_action_sequences_disabled",
+            extra={
+                "runId": state["run_id"],
+                "selectedTool": action_name,
+            },
+        )
+
+        return _finalize_completed_run(
+            state,
+            completed_actions,
+            expected_action_id,
+            result,
+        )
 
     if action_name in TERMINAL_READ_ONLY_TOOLS:
         logger.info(

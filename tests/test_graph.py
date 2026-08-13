@@ -27,6 +27,24 @@ _SEQUENCE_COMPLETE = RequestCompletedResult(
 )
 
 
+@pytest.fixture(autouse=True)
+def _enable_sequences_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both default to False (see config.py); most of this file predates
+    # those toggles and exercises multi-action chaining and cross-turn
+    # history, so restore that behavior here. Tests for the disabled
+    # defaults override these back to False explicitly.
+    monkeypatch.setattr(
+        "catia_agent.graph.settings.enable_multi_action_sequences",
+        True,
+    )
+    monkeypatch.setattr(
+        "catia_agent.graph.settings.enable_conversation_history",
+        True,
+    )
+
+
 def _patch_planner(monkeypatch: pytest.MonkeyPatch, result):
     """
     Patch the planner with either one fixed result, or a list of
@@ -605,6 +623,38 @@ async def test_conversation_history_persists_across_turns(
     )
 
 
+@pytest.mark.asyncio
+async def test_conversation_history_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "catia_agent.graph.settings.enable_conversation_history",
+        False,
+    )
+
+    fake_planner = _patch_planner(
+        monkeypatch,
+        NonAgenticResult(
+            status="non_agentic",
+            message="Route this to the general chat service.",
+        ),
+    )
+
+    session_id = str(uuid4())
+
+    await start_catia_agent(
+        session_id=session_id,
+        user_message="Hello there.",
+    )
+
+    await start_catia_agent(
+        session_id=session_id,
+        user_message="Second message.",
+    )
+
+    assert fake_planner.last_history == []
+
+
 # ---------------------------------------------------------
 # Multi-action sequences within a single run
 # ---------------------------------------------------------
@@ -666,6 +716,43 @@ async def test_sequence_chains_open_then_close_into_one_completion(
     assert "Gearbox.CATProduct closed successfully." in result["message"]
     assert len(result["completedActions"]) == 2
     assert fake_planner.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_multi_action_sequences_disabled_by_default_stops_after_first_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "catia_agent.graph.settings.enable_multi_action_sequences",
+        False,
+    )
+
+    fake_planner = _patch_planner(
+        monkeypatch,
+        [_open_action_result(), _close_action_result()],
+    )
+
+    session_id = str(uuid4())
+
+    pending_open = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox, then close it.",
+    )
+
+    result = await resume_catia_agent(
+        run_id=pending_open["runId"],
+        action_result=ActionExecutionResultRequest(
+            actionId=pending_open["actionId"],
+            success=True,
+            data={"documentName": "Gearbox.CATProduct"},
+        ),
+    )
+
+    # Finalizes as completed after the single action instead of looping
+    # back to the planner for the "close it" half of the request.
+    assert result["status"] == "completed"
+    assert len(result["completedActions"]) == 1
+    assert fake_planner.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     # contracts do not change based on its value.
     # ------------------------------------------------------------------
 
-    model_provider: ModelProviderName = "ollama"
+    model_provider: ModelProviderName = "azure_foundry"
 
     model_temperature: float = Field(
         default=0.0,
@@ -244,11 +244,26 @@ class Settings(BaseSettings):
         le=200,
     )
 
+    # When false, every Agent run starts with no prior conversation
+    # turns (pronoun/ordinal resolution against earlier turns is not
+    # possible), regardless of what a previous run in the same session
+    # recorded. max_conversation_history_messages still bounds how much
+    # history is used when this is true.
+    enable_conversation_history: bool = False
+
     max_actions_per_run: int = Field(
         default=20,
         ge=1,
         le=100,
     )
+
+    # When false, a run always finalizes as "completed" after its first
+    # successful action instead of looping back to the planner for
+    # follow-up/goal-delta planning (see README Section 8.2). This caps
+    # every run at exactly one planner call, at the cost of only ever
+    # executing the first action in a compound request ("open X and
+    # close X" would open X and stop).
+    enable_multi_action_sequences: bool = False
 
     max_completed_action_result_bytes: int = Field(
         default=262_144,
