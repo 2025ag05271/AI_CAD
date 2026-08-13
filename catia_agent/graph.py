@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
+from catia_agent import models as catia_models
 from catia_agent.config import settings
 from catia_agent.graph_classification import (
     _classify_planning_mode,
@@ -182,7 +185,25 @@ graph_builder.add_edge(
 )
 
 
-checkpointer = InMemorySaver()
+# Every Pydantic model class stored in CatiaAgentState (CatiaContext,
+# PlannerResult/CatiaAction variants and their nested arguments,
+# ActionExecutionResultRequest, ...) lives in catia_agent.models, so
+# allowlisting the whole module keeps this in sync automatically as
+# new action/result types are added there.
+_ALLOWED_MSGPACK_MODULES = tuple(
+    cls
+    for _, cls in inspect.getmembers(
+        catia_models,
+        inspect.isclass,
+    )
+    if cls.__module__ == catia_models.__name__
+)
+
+checkpointer = InMemorySaver(
+    serde=JsonPlusSerializer(
+        allowed_msgpack_modules=_ALLOWED_MSGPACK_MODULES
+    )
+)
 
 catia_agent_graph = graph_builder.compile(
     checkpointer=checkpointer
