@@ -234,6 +234,12 @@ class Settings(BaseSettings):
         le=3600,
     )
 
+    # When false, GET /ready reuses the existing MCP tool cache (same
+    # as any other consumer, subject to mcp_tool_cache_ttl_seconds)
+    # instead of forcing a full MCP re-discovery round trip on every
+    # readiness check.
+    readiness_force_mcp_refresh: bool = False
+
     # ------------------------------------------------------------------
     # Agent workflow limits
     # ------------------------------------------------------------------

@@ -390,7 +390,9 @@ class McpReadinessCheck:
 
         try:
             tools = await get_mcp_tool_catalog(
-                force_refresh=True
+                force_refresh=(
+                    settings.readiness_force_mcp_refresh
+                )
             )
 
         except McpError as exc:

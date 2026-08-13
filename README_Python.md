@@ -234,6 +234,7 @@ CATIA_AGENT_AZURE_FOUNDRY_ENABLE_THINKING=false
 CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
 CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
 CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
+CATIA_AGENT_READINESS_FORCE_MCP_REFRESH=false
 
 CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES=20
 CATIA_AGENT_ENABLE_CONVERSATION_HISTORY=false
@@ -1145,6 +1146,10 @@ concurrent requests from refreshing the cache simultaneously. The cache
 is only a performance optimization; the MCP server remains the source of
 truth. Operators can force a refresh via `GET /api/v1/tools?refresh=true`
 or `POST /api/v1/tools/cache/clear` (admin key required in production).
+
+`GET /ready` reuses this same cache (subject to the TTL) instead of
+forcing a fresh MCP round trip on every call, unless
+`CATIA_AGENT_READINESS_FORCE_MCP_REFRESH` is set to `true`.
 
 ## 11. CATIA runtime context
 
