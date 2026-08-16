@@ -1,301 +1,3 @@
-# import numpy as np
-# from langchain_community.utils.math import cosine_similarity
-# from langchain_ollama import OllamaEmbeddings
-# from langgraph.graph import StateGraph, END
-# from typing_extensions import TypedDict
-
-# # 1. Initialize Ollama Embeddings
-# embeddings = OllamaEmbeddings(
-#     model="qllama/bge-small-en-v1.5"
-# )
-
-# # 2. CATIA Support Examples
-# CATIA_EXAMPLES = [
-#     "How do I create a new part in CATIA?",
-#     "How can I generate a drawing from a 3D model?",
-#     "How do I create an assembly in CATIA?",
-#     "What is the difference between Part Design and Generative Shape Design?",
-#     "How do I use Sketcher workbench?",
-#     "How can I measure the distance between two points in CATIA?",
-#     "How do I create a pad from a sketch?",
-#     "How can I import a STEP file into CATIA?",
-#     "How do I export a CATPart to STEP format?",
-#     "Why is my CATIA assembly not updating?",
-#     "How do I use constraints in Assembly Design?",
-#     "How can I calculate the center of gravity of a product?",
-#     "What is a CATProduct file?",
-#     "How do I create a surface in Generative Shape Design?",
-#     "How can I automate CATIA using VBA macros?",
-#     "How do I use Product Structure APIs?",
-#     "How can I access CATIA parameters programmatically?",
-#     "How do I move a component within an assembly?",
-#     "Why am I getting update errors in CATIA?",
-#     "How do I work with DMU Navigator?"
-# ]
-
-# # Human Agent Examples
-# AGENT_EXAMPLES = [
-#     "I need a CATIA expert to help me.",
-#     "Please connect me with a CATIA support engineer.",
-#     "I want to speak with a CATIA specialist.",
-#     "This CATIA issue requires human assistance.",
-#     "Can you escalate this CATIA problem to support?",
-#     "I need help from the CATIA automation team.",
-#     "Please create a support ticket for this CATIA error.",
-#     "Connect me to a CATIA administrator.",
-#     "I am stuck with a CATIA macro issue and need an engineer.",
-#     "Transfer me to the CATIA support team.",
-#     "I need assistance troubleshooting CATIA installation problems.",
-#     "Please escalate my CATIA licensing issue.",
-#     "I cannot resolve this CATIA assembly error, connect me to support.",
-#     "I need an expert to investigate this CATIA crash.",
-#     "Can I speak with someone from the CATIA technical support team?"
-# ]
-
-# # Pre-compute embeddings
-# catia_vectors = embeddings.embed_documents(CATIA_EXAMPLES)
-# agent_vectors = embeddings.embed_documents(AGENT_EXAMPLES)
-
-# SIMILARITY_THRESHOLD = 0.55
-
-
-# # 3. Router Function
-# def route_intent(state: dict) -> str:
-#     user_message = state["user_message"]
-
-#     query_vector = embeddings.embed_query(user_message)
-
-#     catia_scores = cosine_similarity(
-#         [query_vector],
-#         catia_vectors
-#     )[0]
-
-#     agent_scores = cosine_similarity(
-#         [query_vector],
-#         agent_vectors
-#     )[0]
-
-#     max_catia = np.max(catia_scores)
-#     max_agent = np.max(agent_scores)
-
-#     print(f"CATIA Score: {max_catia:.4f}")
-#     print(f"Agent Score: {max_agent:.4f}")
-
-#     # Explicit human handoff
-#     if max_agent > max_catia and max_agent > SIMILARITY_THRESHOLD:
-#         return "agent_node"
-
-#     return "basic_node"
-
-
-# # 4. Define State
-# class GraphState(TypedDict):
-#     user_message: str
-#     response: str
-
-
-# # 5. Nodes
-# def handle_basic(state: GraphState):
-#     return {
-#         "response": "Route to CATIA Knowledge Base / RAG Pipeline"
-#     }
-
-
-# def handle_agent(state: GraphState):
-#     return {
-#         "response": "Route to Human Support Queue"
-#     }
-
-
-# # 6. Build Graph
-# builder = StateGraph(GraphState)
-
-# builder.add_node("basic_node", handle_basic)
-# builder.add_node("agent_node", handle_agent)
-
-# builder.set_conditional_entry_point(
-#     route_intent,
-#     {
-#         "basic_node": "basic_node",
-#         "agent_node": "agent_node"
-#     }
-# )
-
-# builder.add_edge("basic_node", END)
-# builder.add_edge("agent_node", END)
-
-# graph = builder.compile()
-
-
-# # 7. Examples
-# test_queries = [
-#     "How do I create a pad in CATIA?",
-#     "How can I import a STEP file?",
-#     "Please connect me to a support engineer.",
-#     "Can you please open a cad document for me?",
-#     "How do I get the COG of a CATProduct using VBA?"
-# ]
-
-# for query in test_queries:
-#     result = graph.invoke({"user_message": query})
-#     print(f"\nQuery: {query}")
-#     print(f"Response: {result['response']}")
-
-# import numpy as np
-# from langchain_community.utils.math import cosine_similarity
-# from langchain_ollama import OllamaEmbeddings
-# from langgraph.graph import StateGraph, END
-# from typing_extensions import TypedDict
-
-# # Initialize BGE Embedding Model
-# embeddings = OllamaEmbeddings(
-#     model="qllama/bge-small-en-v1.5"
-# )
-
-# # ------------------------------------------------------------------
-# # Intent Descriptions
-# # ------------------------------------------------------------------
-
-# INTENTS = {
-#     "catia_knowledge": """
-#     Questions related to CATIA usage, part design, assembly design,
-#     drafting, generative shape design, DMU, modeling, constraints,
-#     measurements, product structure, CATPart, CATProduct,
-#     troubleshooting, automation, VBA macros, APIs, parameters,
-#     center of gravity calculation, CAD operations, import/export,
-#     STEP files and general CATIA support.
-#     """,
-
-#     "agent_escalation": """
-#     The user wants help from a human expert, CATIA support engineer,
-#     CATIA specialist, automation engineer, technical support team,
-#     issue escalation, ticket creation, direct assistance, live help
-#     or expert intervention.
-#     """
-# }
-
-# # Precompute Intent Embeddings
-# intent_vectors = {
-#     intent: embeddings.embed_query(description)
-#     for intent, description in INTENTS.items()
-# }
-
-# SIMILARITY_THRESHOLD = 0.45
-
-
-# # ------------------------------------------------------------------
-# # Router
-# # ------------------------------------------------------------------
-
-# def route_intent(state: dict) -> str:
-
-#     user_message = state["user_message"]
-
-#     query_vector = embeddings.embed_query(user_message)
-
-#     scores = {}
-
-#     for intent, vector in intent_vectors.items():
-
-#         score = cosine_similarity(
-#             [query_vector],
-#             [vector]
-#         )[0][0]
-
-#         scores[intent] = score
-
-#     best_intent = max(scores, key=scores.get)
-#     best_score = scores[best_intent]
-
-#     print("\nIntent Scores:")
-#     for intent, score in scores.items():
-#         print(f"{intent}: {score:.4f}")
-
-#     print(f"Selected: {best_intent} ({best_score:.4f})")
-
-#     if (
-#         best_intent == "agent_escalation"
-#         and best_score > SIMILARITY_THRESHOLD
-#     ):
-#         return "agent_node"
-
-#     return "basic_node"
-
-
-# # ------------------------------------------------------------------
-# # Graph State
-# # ------------------------------------------------------------------
-
-# class GraphState(TypedDict):
-#     user_message: str
-#     response: str
-
-
-# # ------------------------------------------------------------------
-# # Nodes
-# # ------------------------------------------------------------------
-
-# def handle_basic(state: GraphState):
-#     return {
-#         "response": "Route to CATIA Knowledge Base / RAG System"
-#     }
-
-
-# def handle_agent(state: GraphState):
-#     return {
-#         "response": "Route to CATIA Support Engineer"
-#     }
-
-
-# # ------------------------------------------------------------------
-# # Graph
-# # ------------------------------------------------------------------
-
-# builder = StateGraph(GraphState)
-
-# builder.add_node("basic_node", handle_basic)
-# builder.add_node("agent_node", handle_agent)
-
-# builder.set_conditional_entry_point(
-#     route_intent,
-#     {
-#         "basic_node": "basic_node",
-#         "agent_node": "agent_node"
-#     }
-# )
-
-# builder.add_edge("basic_node", END)
-# builder.add_edge("agent_node", END)
-
-# graph = builder.compile()
-
-
-# # ------------------------------------------------------------------
-# # Test Queries
-# # ------------------------------------------------------------------
-
-# test_queries = [
-#     "How do I create a pad from a sketch in CATIA?",
-#     "How can I calculate center of gravity using VBA?",
-#     "Can you please open a cad document for me?",
-#     "How do I import a STEP file?",
-#     "Please connect me with a CATIA expert.",
-#     "I need help from a support engineer.",
-#     "Escalate this issue to the CATIA team.",
-# ]
-
-# for query in test_queries:
-
-#     print("\n" + "=" * 60)
-#     print("Query:", query)
-
-#     result = graph.invoke({
-#         "user_message": query
-#     })
-
-#     print("Response:", result["response"])
-
-
 from typing import Dict, List, Tuple
 import numpy as np
 from langchain_ollama import OllamaEmbeddings
@@ -303,90 +5,218 @@ from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
 # ------------------------------------------------------------------
-# Initialize BGE Embedding Model
+# Initialize embedding model
 # ------------------------------------------------------------------
-embeddings = OllamaEmbeddings(
-    # model="qllama/bge-small-en-v1.5"
-    model="mahonzhan/all-MiniLM-L6-v2"
-)
+
+# embeddings = OllamaEmbeddings(model="mahonzhan/all-MiniLM-L6-v2")
+embeddings = OllamaEmbeddings(model="qllama/bge-small-en-v1.5")
 
 # ------------------------------------------------------------------
-# Intent Exemplar Anchors
+# Intent exemplar anchors
+# Keep examples diverse, realistic, and close to production wording.
 # ------------------------------------------------------------------
+
 EXEMPLAR_INTENTS: Dict[str, List[str]] = {
     "catia_knowledge_rag": [
+        # Part Design and Sketcher
         "How do I create a pad from a sketch in CATIA?",
+        "How can I create a pocket in Part Design?",
+        "What is the difference between a pad and a shaft feature?",
+        "How do I fully constrain a sketch?",
+        "Why is my CATIA sketch under-constrained?",
+        "How can I create a circular pattern of holes?",
+        "How do I create a rib or slot from a profile?",
+        "How can I edit the thickness of a shell feature?",
+        "Why does CATIA report that the sketch is not closed?",
+        "How do I create a datum plane at an offset?",
+
+        # Assembly and product structure
+        "How do I create an assembly in CATIA?",
+        "What is the difference between Fix, Coincidence, and Contact constraints?",
+        "Why is my CATProduct not updating correctly?",
+        "How do I replace a component in an assembly?",
+        "How can I analyze clashes between assembly components?",
+        "How do I move a component manually in Assembly Design?",
+        "How can I find broken links in a CATProduct?",
+        "What is the difference between a CATPart and a CATProduct?",
+        "How do I use contextual design in a product assembly?",
+        "Why is an assembly constraint inconsistent?",
+
+        # Drafting, tolerancing, and standards
+        "How do I generate a drawing from a 3D model?",
+        "How can I create section and detail views in Drafting?",
+        "How do I add dimensions and tolerances to a CATDrawing?",
+        "What are the criteria for applying geometric tolerances in a drawing?",
+        "Please remind me of the rules for tolerancing a technical drawing.",
+        "How should datum references be selected for GD&T?",
+        "What is the difference between flatness, parallelism, and perpendicularity?",
+        "How do I create a title block in CATIA Drafting?",
+        "Why are drawing views not updating from the 3D model?",
+        "How can I change a drawing standard from ISO to ASME?",
+        "What are CATIA drafting standards and best practices?",
+
+        # Surface and shape design
+        "How do I create a surface in Generative Shape Design?",
+        "What is the difference between join, trim, and split operations?",
+        "How can I repair gaps between surfaces?",
+        "Why does a surface join fail in CATIA?",
+        "How do I create a sweep along a guide curve?",
+        "How can I check surface continuity in GSD?",
+        "What is the difference between G0, G1, and G2 continuity?",
+        "How do I extract a boundary from a surface?",
+
+        # Measurement, properties, and DMU
         "How can I calculate center of gravity using VBA?",
+        "How do I measure surface area and volume?",
+        "How can I calculate mass and inertia properties of a product?",
+        "Why is the center of gravity result incorrect?",
+        "How does DMU Kinematics work in CATIA?",
+        "How do I define joints in a kinematic mechanism?",
+        "How can I run a clearance analysis in DMU Space Analysis?",
+        "What is the Measure Inertia command used for?",
+
+        # Import, export, files, and interoperability
         "How do I import a STEP file in CATIA?",
-        "What is the shortcut for drafting view creation?",
-        "Explain how DMU kinematics works in CATIA.",
-        "How to measure surface area and volume?",
-        "Troubleshooting drafting parameters and constraints.",
+        "How can I export a CATPart to STEP format?",
         "What file formats can CATIA open?",
+        "Why does an imported IGES file contain broken surfaces?",
+        "How do I save a CATDrawing as PDF?",
+        "What settings should I use when exporting a STEP file?",
+        "How can I convert a CATProduct to a 3DXML file?",
+        "Why are product links missing after moving CATIA files?",
+
+        # Automation, VBA, APIs, and troubleshooting
+        "How can I automate CATIA using VBA macros?",
+        "How do I get the center of gravity of a CATProduct using VBA?",
+        "How can I access CATIA parameters programmatically?",
+        "How do I use Product Structure APIs?",
+        "How can I iterate through all products in an assembly using VBA?",
+        "What does GetTechnologicalObject return in CATIA automation?",
+        "How do I obtain a Measurable object in context?",
+        "Why does my CATIA macro raise an object required error?",
+        "How can I update a part through the CATIA API?",
+        "How do I read custom properties from a CATProduct?",
+        "What causes CATIA update errors and how can I troubleshoot them?",
+        "Why does CATIA crash when opening a large assembly?",
+        "How can I improve CATIA performance for large products?",
+        "What should I check when CATIA cannot acquire a license?",
     ],
+
     "catia_agent_command": [
-        "Can you please open a cad document for me?",
+        # Open commands
+        "Can you please open a CAD document for me?",
         "Open C:\\TestData\\Gearbox.CATProduct",
-        "Create a new part document",
-        "Download CAD file 6328629 revision CAD000 from Enovia",
-        "Close the active document",
-        "Start the SAB model for AO ID 12345",
-        "Close all open documents",
+        "Open the bearing housing CATPart.",
+        "Load the assembly from my local folder.",
+        "Please open the latest downloaded CATDrawing.",
+        "Open product 6328629 revision CAD000.",
+        "Launch CATIA and open the active project assembly.",
+
+        # Create commands
+        "Create a new part document.",
+        "Create an empty CATProduct.",
+        "Make a new drawing document using the ISO template.",
+        "Start a new CATIA assembly for me.",
+        "Create a CATPart named Bracket.",
+        "Generate a new drawing from the active part.",
+
+        # Close, save, and lifecycle commands
+        "Close the active document.",
+        "Close all open documents.",
+        "Save the current CATPart.",
+        "Save all modified CATIA documents.",
+        "Save the active document as Bracket_v2.CATPart.",
+        "Close CATIA without saving the current file.",
+        "Export the active drawing to PDF now.",
+
+        # ENOVIA and retrieval commands
+        "Download CAD file 6328629 revision CAD000 from ENOVIA.",
+        "Retrieve part number 65478 revision CAD002 from ENOVIA.",
+        "Fetch the latest released revision of this CAD model.",
+        "Download the CATProduct associated with AO ID 12345.",
+        "Open the latest revision of part 778899 from ENOVIA.",
+        "Check out the selected CAD document from ENOVIA.",
+
+        # Execute actions and automation
+        "Start the SAB model for AO ID 12345.",
+        "Run the center of gravity macro on the active product.",
+        "Execute the update macro for all open documents.",
+        "Measure the active product and return its center of gravity.",
+        "Update the active CATProduct now.",
+        "Run clash analysis on the currently open assembly.",
+        "Apply the company drafting standard to this drawing.",
+        "Insert the downloaded component into the active assembly.",
+        "Replace the selected component with the latest revision.",
+        "Move the selected product instance to coordinates 0, 0, 0.",
+        "Create a support package from the active CATIA session.",
     ],
 }
 
-# ------------------------------------------------------------------
-# Precompute & L2-Normalize Exemplar Vectors
-# ------------------------------------------------------------------
-def _normalize(v: np.ndarray) -> np.ndarray:
-    norm = np.linalg.norm(v, axis=-1, keepdims=True)
-    return v / np.maximum(norm, 1e-12)
 
-intent_matrices: Dict[str, np.ndarray] = {}
+def _normalize(vectors: np.ndarray) -> np.ndarray:
+    """L2-normalize a vector or matrix."""
+    vectors = np.asarray(vectors, dtype=np.float32)
+    norm = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    return vectors / np.maximum(norm, 1e-12)
 
-for intent, phrases in EXEMPLAR_INTENTS.items():
-    raw_vectors = np.array([embeddings.embed_query(p) for p in phrases])
-    intent_matrices[intent] = _normalize(raw_vectors)
 
-# Similarity threshold to confirm Agent command intent
-AGENT_COMMAND_THRESHOLD = 0.42
+# Batch embedding is faster than sending each exemplar separately.
+intent_matrices: Dict[str, np.ndarray] = {
+    intent: _normalize(np.asarray(embeddings.embed_documents(phrases)))
+    for intent, phrases in EXEMPLAR_INTENTS.items()
+}
 
-# ------------------------------------------------------------------
-# Router Decision Logic
-# ------------------------------------------------------------------
+# Tune these values using the labeled validation set below.
+AGENT_COMMAND_THRESHOLD = 0.48
+AGENT_COMMAND_MARGIN = 0.03
+TOP_K = 3
+
+
+def _top_k_mean(scores: np.ndarray, k: int = TOP_K) -> float:
+    """Average the strongest matches to reduce dependence on one exemplar."""
+    k = min(k, scores.size)
+    return float(np.mean(np.partition(scores, -k)[-k:]))
+
+
 def classify_intent(user_message: str) -> Tuple[str, float]:
-    query_vec = _normalize(np.array(embeddings.embed_query(user_message)))
-    
+    """Classify a message and return the selected intent and its score."""
+    query_vec = _normalize(np.asarray(embeddings.embed_query(user_message)))
+
     scores: Dict[str, float] = {}
     for intent, matrix in intent_matrices.items():
-        sims = np.dot(matrix, query_vec)
-        scores[intent] = float(np.max(sims))
-    
-    best_intent = max(scores, key=scores.get)
-    best_score = scores[best_intent]
-    
-    print(f"\n[Router Logs]")
-    for intent, score in scores.items():
-        print(f"  - {intent}: {score:.4f}")
-    print(f"Selected: {best_intent} ({best_score:.4f})")
-    
-    return best_intent, best_score
+        similarities = matrix @ query_vec
+        scores[intent] = _top_k_mean(similarities)
+
+    knowledge_score = scores["catia_knowledge_rag"]
+    command_score = scores["catia_agent_command"]
+
+    # Prefer the safer RAG route when confidence or separation is insufficient.
+    is_agent_command = (
+        command_score >= AGENT_COMMAND_THRESHOLD
+        and command_score - knowledge_score >= AGENT_COMMAND_MARGIN
+    )
+
+    selected_intent = (
+        "catia_agent_command" if is_agent_command else "catia_knowledge_rag"
+    )
+    selected_score = scores[selected_intent]
+
+    print(
+        f"Knowledge score={knowledge_score:.4f}, "
+        f"Command score={command_score:.4f}, "
+        f"Selected={selected_intent}"
+    )
+    return selected_intent, selected_score
 
 
 def route_intent(state: dict) -> str:
-    user_message = state["user_message"]
-    best_intent, best_score = classify_intent(user_message)
-    
-    if best_intent == "catia_agent_command" and best_score >= AGENT_COMMAND_THRESHOLD:
+    best_intent, _ = classify_intent(state["user_message"])
+    if best_intent == "catia_agent_command":
         return "agent_command_node"
-    
-    # Default fallback to RAG for informational queries
     return "basic_rag_node"
 
-# ------------------------------------------------------------------
-# Graph State & Nodes
-# ------------------------------------------------------------------
-class GraphState(TypedDict):
+
+class GraphState(TypedDict, total=False):
     user_message: str
     selected_node: str
     response: str
@@ -402,17 +232,13 @@ def handle_basic_rag(state: GraphState) -> dict:
 def handle_agent_command(state: GraphState) -> dict:
     return {
         "selected_node": "agent_command_node",
-        "response": "Routed to CATIA LangGraph Execution Agent.",
+        "response": "Routed to CATIA LangGraph Execution Agent",
     }
 
-# ------------------------------------------------------------------
-# Graph Construction
-# ------------------------------------------------------------------
-builder = StateGraph(GraphState)
 
+builder = StateGraph(GraphState)
 builder.add_node("basic_rag_node", handle_basic_rag)
 builder.add_node("agent_command_node", handle_agent_command)
-
 builder.set_conditional_entry_point(
     route_intent,
     {
@@ -420,30 +246,61 @@ builder.set_conditional_entry_point(
         "agent_command_node": "agent_command_node",
     },
 )
-
 builder.add_edge("basic_rag_node", END)
 builder.add_edge("agent_command_node", END)
-
 graph = builder.compile()
 
-# ------------------------------------------------------------------
-# Test Execution
-# ------------------------------------------------------------------
+
+# Keep evaluation queries separate from training exemplars.
+EVALUATION_SET: List[Tuple[str, str]] = [
+    ("What are the rules for datum selection in a drawing?", "catia_knowledge_rag"),
+    ("Why is my pocket feature failing after an update?", "catia_knowledge_rag"),
+    ("Tell me how to calculate product inertia with a macro.", "catia_knowledge_rag"),
+    ("Which neutral CAD formats are supported?", "catia_knowledge_rag"),
+    ("Explain how I can repair disconnected surfaces.", "catia_knowledge_rag"),
+    ("Could you open D:\\CAD\\Pump.CATProduct?", "catia_agent_command"),
+    ("Please create a CATPart called MountingPlate.", "catia_agent_command"),
+    ("Get revision CAD004 of item 98765 from ENOVIA.", "catia_agent_command"),
+    ("Run the COG automation on the product I have open.", "catia_agent_command"),
+    ("Save every modified document and close CATIA.", "catia_agent_command"),
+    # Deliberately difficult question-versus-command pairs
+    ("How do I open a CATProduct?", "catia_knowledge_rag"),
+    ("Open the CATProduct.", "catia_agent_command"),
+    ("How can I export a drawing as PDF?", "catia_knowledge_rag"),
+    ("Export this drawing as PDF.", "catia_agent_command"),
+]
+
+
+def evaluate() -> float:
+    correct = 0
+    print("\nEvaluation results")
+    print("-" * 80)
+
+    for query, expected in EVALUATION_SET:
+        predicted, score = classify_intent(query)
+        passed = predicted == expected
+        correct += int(passed)
+        print(
+            f"{'PASS' if passed else 'FAIL'} | expected={expected:<24} "
+            f"predicted={predicted:<24} score={score:.4f} | {query}"
+        )
+
+    accuracy = correct / len(EVALUATION_SET)
+    print("-" * 80)
+    print(f"Accuracy: {correct}/{len(EVALUATION_SET)} = {accuracy:.2%}")
+    return accuracy
+
+
 if __name__ == "__main__":
+    evaluate()
+
     test_queries = [
-        # "How do I create a pad from a sketch in CATIA?",
-        # "How can I calculate center of gravity using VBA?",
-        # "Can you please open a cad document for me?",
-        # "How do I import a STEP file?",
-        # "Download CAD file 65478 CAD002 from Enovia",
-        # "Create a new part document",
-        # "An information about CAD Standards and best practices in CATIA is needed.",
-        "i got my facts about tolerancing in the drawing wrong, could you please remind me the criterias?",
+        "I got my facts about tolerancing in the drawing wrong; remind me of the criteria.",
+        "Open the latest gearbox assembly from ENOVIA.",
     ]
 
     for query in test_queries:
-        print("\n" + "=" * 65)
+        print("\n" + "=" * 80)
         print("Query:", query)
         result = graph.invoke({"user_message": query})
-        print("Destination Node:", result["selected_node"])
-        print("Action Taken:", result["response"])
+        print("Response:", result["response"])
