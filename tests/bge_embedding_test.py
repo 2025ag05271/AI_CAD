@@ -296,7 +296,7 @@ if __name__ == "__main__":
     evaluate()
 
     test_queries = [
-        "Can you please open this document for me? It lives in this path C:\\TestData\\Gearbox.CATProduct",
+        r"Can you please open this document for me? It lives in this path <file_path>.",
     ]
 
     for query in test_queries:

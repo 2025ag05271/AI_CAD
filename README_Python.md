@@ -684,6 +684,19 @@ That ask-vs-agent decision is made in two stages:
    local Ollama install with the embedding model pulled, even when
    `CATIA_AGENT_MODEL_PROVIDER` is `azure_foundry`, since embeddings
    always run locally regardless of the chat provider.
+
+   Long, unusual absolute file paths (real CATIA files can live many
+   folders deep, for example under a synced OneDrive tree) dilute the
+   embedding signal and can pull both intent scores toward a
+   compressed, nearly-tied high band. `_strip_file_paths` in
+   `catia_agent/intent_classifier.py` replaces any Windows or UNC
+   path (quoted or unquoted) with a flat placeholder before embedding
+   — applied identically to the exemplar phrases and to the incoming
+   message — so classification is judged on the surrounding
+   natural-language wording rather than on an arbitrarily long,
+   path-specific token sequence. The exemplar set also includes a few
+   longer, conversational phrasings ("it lives in this path ...",
+   "it's located at ...") in addition to short imperative commands.
 2. **Model tool selection (fallback and safety net).** If the
    embedding classifier is disabled
    (`CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=false`), if it is

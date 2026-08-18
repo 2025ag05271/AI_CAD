@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,37 @@ logger = get_logger(__name__)
 
 AGENTIC_INTENT = "catia_agent_command"
 NON_AGENTIC_INTENT = "catia_knowledge_rag"
+
+# Long, unusual absolute file paths (real CATIA files often live many
+# folders deep, e.g. under a synced OneDrive tree) dilute the embedding
+# signal that otherwise clearly separates "open/download/create ..."
+# commands from knowledge questions, pulling both intent scores toward
+# a compressed, nearly-tied high band. Replacing any Windows/UNC path
+# with a flat placeholder before embedding keeps the classification
+# focused on the surrounding natural-language wording instead of on an
+# arbitrarily long, path-specific token sequence. Applied identically
+# to exemplars and to the incoming message so both sides are embedded
+# on the same normalized footing.
+_FILE_PATH_PLACEHOLDER = "a file path"
+
+_QUOTED_FILE_PATH_PATTERN = re.compile(
+    r"""(["'])(?:[A-Za-z]:[\\/]|\\\\)[^"']*\1"""
+)
+
+_UNQUOTED_FILE_PATH_PATTERN = re.compile(
+    r"""(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>|]+"""
+)
+
+
+def _strip_file_paths(text: str) -> str:
+    text = _QUOTED_FILE_PATH_PATTERN.sub(
+        _FILE_PATH_PLACEHOLDER, text
+    )
+    text = _UNQUOTED_FILE_PATH_PATTERN.sub(
+        _FILE_PATH_PLACEHOLDER, text
+    )
+    return text
+
 
 # Keep examples diverse, realistic, and close to production wording.
 EXEMPLAR_INTENTS: dict[str, list[str]] = {
@@ -161,6 +193,22 @@ EXEMPLAR_INTENTS: dict[str, list[str]] = {
         "Replace the selected component with the latest revision.",
         "Move the selected product instance to coordinates 0, 0, 0.",
         "Create a support package from the active CATIA session.",
+
+        # Conversational/indirect phrasing that explains where a file
+        # lives, rather than a short imperative command. Long file
+        # paths are stripped before embedding (see
+        # _strip_file_paths), but the surrounding wording still needs
+        # its own agentic-intent coverage among the exemplars.
+        "Can you please open a document for me? It lives in this "
+        "path C:\\Users\\me\\Documents\\Project\\Part.CATPart",
+        "I have a CATPart I need opened, it's located at "
+        "D:\\Data\\Bracket.CATPart",
+        "Please open the file located at "
+        "C:\\Shared\\Models\\Assembly.CATProduct for me",
+        "There's a product I'd like opened, you can find it at "
+        "C:\\Projects\\Gearbox\\Gearbox.CATProduct",
+        "Could you download this for me? It's part number 65478 "
+        "revision CAD002 from ENOVIA.",
     ],
 }
 
@@ -205,7 +253,12 @@ async def _get_intent_matrices() -> dict[str, np.ndarray]:
         matrices: dict[str, np.ndarray] = {}
 
         for intent, phrases in EXEMPLAR_INTENTS.items():
-            vectors = await embeddings.aembed_documents(phrases)
+            normalized_phrases = [
+                _strip_file_paths(phrase) for phrase in phrases
+            ]
+            vectors = await embeddings.aembed_documents(
+                normalized_phrases
+            )
             matrices[intent] = _normalize(np.asarray(vectors))
 
         _intent_matrices = matrices
@@ -227,7 +280,9 @@ async def classify_request_intent(
         matrices = await _get_intent_matrices()
         query_vector = _normalize(
             np.asarray(
-                await embeddings.aembed_query(user_message)
+                await embeddings.aembed_query(
+                    _strip_file_paths(user_message)
+                )
             )
         )
 

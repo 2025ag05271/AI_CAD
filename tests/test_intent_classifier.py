@@ -85,6 +85,45 @@ def test_normalize_produces_unit_vectors() -> None:
     )
 
 
+def test_strip_file_paths_replaces_quoted_path_with_spaces() -> None:
+    message = (
+        "can you please open a document for me? it lives in this "
+        'path "C:\\Users\\me\\OneDrive - Autoliv\\Part.CATPart"'
+    )
+
+    stripped = intent_classifier._strip_file_paths(message)
+
+    assert stripped == (
+        "can you please open a document for me? it lives in this "
+        "path a file path"
+    )
+
+
+def test_strip_file_paths_replaces_unquoted_path() -> None:
+    stripped = intent_classifier._strip_file_paths(
+        "Open C:\\TestData\\Gearbox.CATProduct"
+    )
+
+    assert stripped == "Open a file path"
+
+
+def test_strip_file_paths_replaces_unc_path() -> None:
+    stripped = intent_classifier._strip_file_paths(
+        "Download the CATProduct from "
+        "\\\\server\\share\\folder\\file.CATProduct"
+    )
+
+    assert stripped == "Download the CATProduct from a file path"
+
+
+def test_strip_file_paths_leaves_path_free_text_unchanged() -> None:
+    message = "How is the weather looking like in India?"
+
+    assert (
+        intent_classifier._strip_file_paths(message) == message
+    )
+
+
 def test_top_k_mean_averages_strongest_scores() -> None:
     scores = np.array([0.1, 0.9, 0.5, 0.2])
 
@@ -119,6 +158,44 @@ async def test_classify_request_intent_selects_agentic(
         scores[intent_classifier.AGENTIC_INTENT]
         > scores[intent_classifier.NON_AGENTIC_INTENT]
     )
+
+
+@pytest.mark.asyncio
+async def test_classify_request_intent_strips_file_path_before_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_queries: list[str] = []
+
+    async def fake_aembed_documents(
+        phrases: list[str],
+    ) -> list[list[float]]:
+        if phrases == ["open the document"]:
+            return [[1.0, 0.0]]
+
+        return [[0.0, 1.0]]
+
+    async def fake_aembed_query(
+        text: str,
+    ) -> list[float]:
+        captured_queries.append(text)
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(
+        intent_classifier,
+        "embeddings",
+        SimpleNamespace(
+            aembed_documents=fake_aembed_documents,
+            aembed_query=fake_aembed_query,
+        ),
+    )
+
+    await intent_classifier.classify_request_intent(
+        'Open "C:\\Users\\me\\Project\\Part.CATPart" please.'
+    )
+
+    assert captured_queries == [
+        "Open a file path please."
+    ]
 
 
 @pytest.mark.asyncio
