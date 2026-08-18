@@ -45,6 +45,27 @@ def _enable_sequences_and_history(
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_embedding_intent_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This file predates the embedding intent classifier and exercises
+    # planner behavior through the mocked plan_catia_action; a real
+    # classification here (a local Ollama call) would both make tests
+    # depend on a running Ollama instance and could short-circuit
+    # plan_action_node before the mocked planner ever runs. Default to
+    # "agentic" (never short-circuit) so every test always reaches the
+    # planner mock as before. Tests for the classifier itself override
+    # this back explicitly.
+    async def fake_is_agentic_request(user_message: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "catia_agent.graph.is_agentic_request",
+        fake_is_agentic_request,
+    )
+
+
 def _patch_planner(monkeypatch: pytest.MonkeyPatch, result):
     """
     Patch the planner with either one fixed result, or a list of
@@ -183,6 +204,58 @@ async def test_start_catia_agent_returns_non_agentic_directly(
 
     assert response["status"] == "non_agentic"
     assert "message" in response
+
+
+@pytest.mark.asyncio
+async def test_embedding_classifier_routes_to_general_chat_without_calling_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_is_agentic_request(user_message: str) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "catia_agent.graph.is_agentic_request",
+        fake_is_agentic_request,
+    )
+
+    fake_plan_catia_action = _patch_planner(
+        monkeypatch,
+        _open_action_result(),
+    )
+
+    response = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="What is the capital of France?",
+    )
+
+    assert response["status"] == "non_agentic"
+    assert fake_plan_catia_action.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_classifier_uncertain_falls_back_to_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_is_agentic_request(user_message: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "catia_agent.graph.is_agentic_request",
+        fake_is_agentic_request,
+    )
+
+    fake_plan_catia_action = _patch_planner(
+        monkeypatch,
+        _open_action_result(),
+    )
+
+    response = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Open the gearbox.",
+    )
+
+    assert response["status"] == "action_required"
+    assert fake_plan_catia_action.call_count == 1
 
 
 @pytest.mark.asyncio

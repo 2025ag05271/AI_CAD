@@ -263,6 +263,7 @@ EVALUATION_SET: List[Tuple[str, str]] = [
     ("Get revision CAD004 of item 98765 from ENOVIA.", "catia_agent_command"),
     ("Run the COG automation on the product I have open.", "catia_agent_command"),
     ("Save every modified document and close CATIA.", "catia_agent_command"),
+    
     # Deliberately difficult question-versus-command pairs
     ("How do I open a CATProduct?", "catia_knowledge_rag"),
     ("Open the CATProduct.", "catia_agent_command"),
@@ -295,8 +296,7 @@ if __name__ == "__main__":
     evaluate()
 
     test_queries = [
-        "I got my facts about tolerancing in the drawing wrong; remind me of the criteria.",
-        "Open the latest gearbox assembly from ENOVIA.",
+        "Can you please open this document for me? It lives in this path C:\\TestData\\Gearbox.CATProduct",
     ]
 
     for query in test_queries:

@@ -241,6 +241,52 @@ class Settings(BaseSettings):
     readiness_force_mcp_refresh: bool = False
 
     # ------------------------------------------------------------------
+    # Embedding-based ask-vs-agent intent classification
+    #
+    # Decides, before the first planner call of a run, whether a
+    # message is a concrete CATIA action request ("agentic") or a
+    # general/informational message that should be routed straight to
+    # route_to_general_chat, without spending a model round trip on
+    # that decision (see catia_agent/intent_classifier.py). This uses
+    # a local Ollama embedding model, independent of model_provider,
+    # so a local Ollama install is required even when model_provider
+    # is azure_foundry.
+    # ------------------------------------------------------------------
+
+    enable_embedding_intent_classifier: bool = True
+
+    intent_classifier_model: str = Field(
+        default="qllama/bge-small-en-v1.5",
+        min_length=1,
+        max_length=200,
+    )
+
+    # Top-K exemplar similarities averaged per intent, to reduce
+    # dependence on any single exemplar phrase.
+    intent_classifier_top_k: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+    )
+
+    # Minimum agentic-intent similarity score required to skip the
+    # model and route directly to a CATIA planning call.
+    intent_classifier_agentic_threshold: float = Field(
+        default=0.48,
+        ge=0.0,
+        le=1.0,
+    )
+
+    # Minimum separation the agentic score must have over the
+    # general-chat score. Below this margin, the safer general-chat
+    # route is preferred.
+    intent_classifier_agentic_margin: float = Field(
+        default=0.03,
+        ge=0.0,
+        le=1.0,
+    )
+
+    # ------------------------------------------------------------------
     # Agent workflow limits
     # ------------------------------------------------------------------
 

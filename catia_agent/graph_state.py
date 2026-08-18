@@ -38,6 +38,11 @@ class CatiaAgentState(TypedDict, total=False):
     user_message: str
     catia_context: CatiaContext | None
 
+    # Set once in start_catia_agent from the embedding intent
+    # classifier; None means the classifier did not run or could not
+    # decide, so plan_action_node lets the model decide as before.
+    is_agentic_request: bool | None
+
     messages: list[dict[str, str]]
     sequence_progress: list[dict[str, str]]
     planning_mode: str

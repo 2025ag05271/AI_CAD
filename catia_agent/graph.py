@@ -40,6 +40,7 @@ from catia_agent.graph_terminal import (
     prepare_sequence_completed_response_node,
     prepare_terminal_response_node,
 )
+from catia_agent.intent_classifier import is_agentic_request
 from catia_agent.logging_config import (
     action_id_context,
     get_logger,
@@ -262,12 +263,17 @@ async def start_catia_agent(
         },
     )
 
+    is_agentic = await is_agentic_request(
+        user_message
+    )
+
     try:
         initial_state: CatiaAgentState = {
             "session_id": session_id,
             "run_id": run_id,
             "user_message": user_message.strip(),
             "catia_context": catia_context,
+            "is_agentic_request": is_agentic,
             "messages": (
                 list(
                     existing_state.get(

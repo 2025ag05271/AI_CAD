@@ -111,6 +111,8 @@ All development services are bound to loopback addresses. In production
 - Ollama Python client
 - Ollama for Windows (local development)
 - Qwen 3.6 27B on Azure AI Foundry (production model)
+- langchain-ollama + NumPy (embedding-based ask-vs-agent intent classifier, Section 8.1)
+- qllama/bge-small-en-v1.5 pulled in local Ollama (embedding model; required even when CATIA_AGENT_MODEL_PROVIDER is azure_foundry)
 
 Environment setup used for development:
 
@@ -127,6 +129,14 @@ python -m pip install fastapi "uvicorn[standard]" langgraph
 python -m pip install "fastmcp>=3.4,<4"
 python -m pip install httpx
 python -m pip install truststore
+python -m pip install langchain-ollama numpy
+```
+
+Pull the embedding model used by the ask-vs-agent classifier (Section
+8.1) in your local Ollama install:
+
+```powershell
+ollama pull qllama/bge-small-en-v1.5
 ```
 
 spaCy is no longer a dependency (see Section 8.2).
@@ -235,6 +245,12 @@ CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
 CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
 CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
 CATIA_AGENT_READINESS_FORCE_MCP_REFRESH=false
+
+CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=true
+CATIA_AGENT_INTENT_CLASSIFIER_MODEL=qllama/bge-small-en-v1.5
+CATIA_AGENT_INTENT_CLASSIFIER_TOP_K=3
+CATIA_AGENT_INTENT_CLASSIFIER_AGENTIC_THRESHOLD=0.48
+CATIA_AGENT_INTENT_CLASSIFIER_AGENTIC_MARGIN=0.03
 
 CATIA_AGENT_MAX_CONVERSATION_HISTORY_MESSAGES=20
 CATIA_AGENT_ENABLE_CONVERSATION_HISTORY=false
@@ -646,9 +662,36 @@ plan_action
 ### 8.1 Chat vs agentic orchestration
 
 The .NET client sends only the user message. It does not choose a chat or
-agent mode. Deciding that is the orchestrator's job. The model only makes
-the routing decision through a tool call. It never answers the user
-directly:
+agent mode. Deciding that is the orchestrator's job.
+
+That ask-vs-agent decision is made in two stages:
+
+1. **Embedding classifier (primary, default on).** Before the first
+   planner call of a run, `is_agentic_request` (see
+   `catia_agent/intent_classifier.py`) embeds the user message with a
+   local Ollama model (`CATIA_AGENT_INTENT_CLASSIFIER_MODEL`, default
+   `qllama/bge-small-en-v1.5`) and compares it against two curated sets
+   of exemplar phrases — concrete CATIA action requests vs. general or
+   informational messages — using cosine similarity. If the message
+   scores confidently as a CATIA action request
+   (`CATIA_AGENT_INTENT_CLASSIFIER_AGENTIC_THRESHOLD`, with at least
+   `CATIA_AGENT_INTENT_CLASSIFIER_AGENTIC_MARGIN` separation over the
+   general-chat score), the run proceeds to the model as normal. If it
+   confidently scores as general/informational, `plan_action_node`
+   returns a `non_agentic` result immediately and **the model is never
+   called for that turn** — this is a full Azure Foundry/Ollama chat
+   round trip saved per non-agentic message. This step requires a
+   local Ollama install with the embedding model pulled, even when
+   `CATIA_AGENT_MODEL_PROVIDER` is `azure_foundry`, since embeddings
+   always run locally regardless of the chat provider.
+2. **Model tool selection (fallback and safety net).** If the
+   embedding classifier is disabled
+   (`CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=false`), if it is
+   uncertain (score below the threshold/margin), or if the local
+   Ollama embedding call fails for any reason (for example, Ollama is
+   not running), the run falls back to today's behavior: the model
+   makes the routing decision through a tool call and never answers
+   the user directly.
 
 - If the model selects a CATIA MCP tool, the request is agentic. It
   proceeds through `prepare_action` → `await_action_result` →
@@ -658,7 +701,9 @@ directly:
   `non_agentic` through `prepare_terminal_response`. The `.message` field
   is a routing note, not an answer, and the caller must route the original
   message to a separate general-purpose chat model and return that
-  model's answer to the user.
+  model's answer to the user. The embedding classifier short-circuit
+  above produces the exact same `non_agentic` shape, so callers do not
+  need to distinguish which stage decided this.
 - If the request clearly requires execution but no approved tool supports
   it, the model must call `report_unsupported_catia_action`. This returns
   `unsupported_request` with a `requestedCapability` and `reason`.
@@ -710,9 +755,10 @@ sequence connectors ("then", "after that", "followed by", "next", ";",
 verb (after stripping conversational filler such as "please", "can you",
 "I need to"), rather than doing full part-of-speech tagging.
 This classifier is not the ask-vs-agent decision maker; that decision is
-made exclusively by the model, via tool selection between
-route_to_general_chat and a CATIA tool (see Section 8.1 and the system
-prompt in `catia_agent/planner.py`). It only supplies a cheap, cautious
+made primarily by the embedding classifier described in Section 8.1, with
+the model's route_to_general_chat/CATIA tool selection as the fallback
+and safety net (see Section 8.1 and the system prompt in
+`catia_agent/planner.py`). It only supplies a cheap, cautious
 signal for whether the follow-up planning loop below can be skipped after
 the first action succeeds.
 

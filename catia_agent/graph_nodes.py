@@ -15,6 +15,7 @@ from catia_agent.logging_config import get_logger
 from catia_agent.models import (
     ActionExecutionResultRequest,
     ActionRequiredResult,
+    NonAgenticResult,
     PlannerResult,
     RequestCompletedResult,
     UnsupportedRequestResult,
@@ -51,6 +52,33 @@ async def plan_action_node(
                     requestedCapability=None,
                     reason="action_limit_reached",
                 )
+            )
+        }
+
+    # Embedding classifier already decided this run's opening message
+    # is not a CATIA action request: skip the model call entirely and
+    # route straight to general chat, same outcome as the model
+    # selecting route_to_general_chat itself. Only applies before the
+    # first action; a False decision from an earlier turn never
+    # applies here because completed_actions would be non-empty.
+    if (
+        not completed_actions
+        and state.get("is_agentic_request") is False
+    ):
+        logger.info(
+            "embedding_classifier_routed_to_general_chat",
+            extra={"runId": state["run_id"]},
+        )
+
+        return {
+            "planner_result": NonAgenticResult(
+                status="non_agentic",
+                message=(
+                    "This request does not require a CATIA "
+                    "execution action."
+                ),
+                routeTarget="general_chat",
+                routeReason="general_conversation",
             )
         }
 
