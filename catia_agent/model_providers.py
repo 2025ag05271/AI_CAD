@@ -203,6 +203,16 @@ class AzureFoundryToolCallingModelClient:
             },
         }
 
+        # DEBUG only (never contains the bearer token, which is a
+        # header, not part of the body): full request payload for
+        # troubleshooting prompt shape/content issues against the
+        # actual Azure Foundry deployment. Set
+        # CATIA_AGENT_LOG_LEVEL=DEBUG to see this.
+        logger.debug(
+            "azure_foundry_request_payload",
+            extra={"payload": payload},
+        )
+
         try:
             response = await self._client.post(
                 self._chat_completions_url,
@@ -244,6 +254,39 @@ class AzureFoundryToolCallingModelClient:
                 "The Azure AI Foundry model returned a "
                 "non-JSON response."
             ) from exc
+
+        # Azure Foundry's vLLM backend can transparently reuse
+        # KV-cache state for the portion of the prompt (tools/system
+        # prompt) that matches a previous request byte-for-byte; there
+        # is no client-side opt-in for this, so prompt construction
+        # keeps that prefix stable (see planner.py) and this logs the
+        # OpenAI-shaped usage.prompt_tokens_details.cached_tokens
+        # field, when the backend returns it, as the only direct
+        # evidence of whether that reuse is actually happening.
+        usage = body.get("usage") or {}
+        prompt_tokens_details = (
+            usage.get("prompt_tokens_details") or {}
+        )
+
+        logger.info(
+            "azure_foundry_usage",
+            extra={
+                "promptTokens": usage.get(
+                    "prompt_tokens"
+                ),
+                "completionTokens": usage.get(
+                    "completion_tokens"
+                ),
+                "totalTokens": usage.get(
+                    "total_tokens"
+                ),
+                "cachedTokens": (
+                    prompt_tokens_details.get(
+                        "cached_tokens"
+                    )
+                ),
+            },
+        )
 
         choices = body.get("choices")
 

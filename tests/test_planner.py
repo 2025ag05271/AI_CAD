@@ -581,6 +581,63 @@ async def test_plan_catia_action_trims_conversation_history(
 
 
 @pytest.mark.asyncio
+async def test_plan_catia_action_sends_tools_in_deterministic_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Deliberately out-of-alphabetical-order and interleaved with the
+    # orchestrator tools' names, to prove the final list is sorted
+    # rather than just concatenated in catalog/declaration order. This
+    # keeps the tools portion of the prompt byte-identical across
+    # calls for Azure Foundry/vLLM prefix-cache reuse (see planner.py).
+    async def fake_load_tools(force_refresh: bool = False):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "start_model",
+                    "description": "Start the SAB model.",
+                    "parameters": {},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "close_cad_document",
+                    "description": "Close a CATIA document.",
+                    "parameters": {},
+                },
+            },
+        ]
+
+    monkeypatch.setattr(
+        "catia_agent.planner.load_ollama_tools_from_mcp",
+        fake_load_tools,
+    )
+
+    captured: dict = {}
+
+    async def fake_chat(**kwargs):
+        captured["tools"] = kwargs["tools"]
+        return {"message": {"tool_calls": []}}
+
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        fake_chat,
+    )
+
+    await plan_catia_action(
+        user_command="Open the gearbox.",
+    )
+
+    tool_names = [
+        tool["function"]["name"]
+        for tool in captured["tools"]
+    ]
+
+    assert tool_names == sorted(tool_names)
+
+
+@pytest.mark.asyncio
 async def test_plan_catia_action_injects_completed_actions_system_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

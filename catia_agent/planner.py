@@ -855,10 +855,16 @@ async def plan_catia_action(
             },
         )
 
-    available_tools = [
-        *mcp_tools,
-        *ORCHESTRATOR_TOOLS,
-    ]
+    # Sorted (not just concatenated) so the tool list is byte-identical
+    # across calls regardless of MCP catalog refresh timing/order.
+    # Azure Foundry's vLLM backend can reuse KV-cache for a matching
+    # prompt prefix (tools + system prompt); any reordering here would
+    # invalidate that prefix for no reason. See model_providers.py for
+    # the corresponding cached_tokens usage logging.
+    available_tools = sorted(
+        [*mcp_tools, *ORCHESTRATOR_TOOLS],
+        key=lambda tool: tool["function"]["name"],
+    )
 
     history = conversation_history or []
 

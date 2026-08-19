@@ -120,6 +120,145 @@ async def test_select_tool_normalizes_real_vllm_reasoning_response(
 
 
 @pytest.mark.asyncio
+async def test_select_tool_logs_usage_and_cached_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _build_client()
+
+    fake_message = {"role": "assistant", "tool_calls": []}
+
+    fake_response = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [{"message": fake_message}],
+            "usage": {
+                "prompt_tokens": 1500,
+                "completion_tokens": 20,
+                "total_tokens": 1520,
+                "prompt_tokens_details": {
+                    "cached_tokens": 1400,
+                },
+            },
+        },
+        request=httpx.Request(
+            "POST",
+            "https://example.services.ai.azure.com/models/chat/completions",
+        ),
+    )
+
+    monkeypatch.setattr(
+        client._client,
+        "post",
+        AsyncMock(return_value=fake_response),
+    )
+
+    with caplog.at_level("INFO"):
+        await client.select_tool(messages=[], tools=[])
+
+    usage_records = [
+        record
+        for record in caplog.records
+        if record.message == "azure_foundry_usage"
+    ]
+
+    assert len(usage_records) == 1
+    assert usage_records[0].promptTokens == 1500
+    assert usage_records[0].completionTokens == 20
+    assert usage_records[0].totalTokens == 1520
+    assert usage_records[0].cachedTokens == 1400
+
+
+@pytest.mark.asyncio
+async def test_select_tool_logs_usage_with_missing_cached_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _build_client()
+
+    fake_response = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [
+                {"message": {"role": "assistant", "tool_calls": []}}
+            ],
+        },
+        request=httpx.Request(
+            "POST",
+            "https://example.services.ai.azure.com/models/chat/completions",
+        ),
+    )
+
+    monkeypatch.setattr(
+        client._client,
+        "post",
+        AsyncMock(return_value=fake_response),
+    )
+
+    with caplog.at_level("INFO"):
+        await client.select_tool(messages=[], tools=[])
+
+    usage_records = [
+        record
+        for record in caplog.records
+        if record.message == "azure_foundry_usage"
+    ]
+
+    assert len(usage_records) == 1
+    assert usage_records[0].cachedTokens is None
+
+
+@pytest.mark.asyncio
+async def test_select_tool_logs_request_payload_at_debug_level(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _build_client()
+
+    fake_response = httpx.Response(
+        status_code=200,
+        json={
+            "choices": [
+                {"message": {"role": "assistant", "tool_calls": []}}
+            ],
+        },
+        request=httpx.Request(
+            "POST",
+            "https://example.services.ai.azure.com/models/chat/completions",
+        ),
+    )
+
+    monkeypatch.setattr(
+        client._client,
+        "post",
+        AsyncMock(return_value=fake_response),
+    )
+
+    messages = [{"role": "user", "content": "Open the gearbox."}]
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "open_cad_document"},
+        }
+    ]
+
+    with caplog.at_level("DEBUG"):
+        await client.select_tool(messages=messages, tools=tools)
+
+    payload_records = [
+        record
+        for record in caplog.records
+        if record.message == "azure_foundry_request_payload"
+    ]
+
+    assert len(payload_records) == 1
+    assert payload_records[0].payload["messages"] == messages
+    assert payload_records[0].payload["tools"] == tools
+    assert payload_records[0].payload["tool_choice"] == "required"
+
+
+
+@pytest.mark.asyncio
 async def test_select_tool_forces_tool_choice_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

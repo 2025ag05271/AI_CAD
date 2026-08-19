@@ -1079,6 +1079,49 @@ module-level `model_client`. A future third provider only needs to
 implement `select_tool` and be added to that factory — nothing else in
 the graph, MCP layer, or API contracts changes.
 
+### 9.1 Prompt/prefix caching (Azure Foundry)
+
+The `messages` and `tools` sent to the model are large and mostly
+identical between calls (the system prompt and tool schemas do not
+change turn to turn), so the request is deliberately structured to
+maximize KV-cache reuse on the Azure Foundry vLLM backend:
+
+- **Tool ordering is deterministic.** `plan_catia_action` sorts the
+  combined MCP + orchestrator tool list by function name
+  (`available_tools = sorted(...)` in `catia_agent/planner.py`)
+  instead of concatenating them in catalog order. The MCP tool catalog
+  is periodically refreshed (`CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS`)
+  and nothing guarantees the remote server returns tools in the same
+  order every time; sorting removes that as a source of prefix churn.
+- **Static content comes first.** The system prompt text
+  (`_build_system_prompt`/`_build_followup_system_prompt`) is a fixed
+  string literal with no per-request interpolation. Dynamic content
+  (CATIA context, completed-actions summary, conversation history,
+  retry hints, the final user message) is appended after it, not
+  interleaved with it, so the longest possible prefix of the rendered
+  prompt stays byte-identical across calls.
+- **No client-side cache opt-in exists for this backend.** Unlike
+  Anthropic's explicit cache-breakpoint API, OpenAI-compatible
+  vLLM-style prefix caching is transparent: the server reuses KV-cache
+  state automatically whenever an incoming prompt's prefix matches a
+  previous one, with no request field required. There is nothing to
+  "enable" beyond keeping that prefix stable, which the two points
+  above are for.
+- **Observability.** `AzureFoundryToolCallingModelClient.select_tool`
+  logs an `azure_foundry_usage` event with `promptTokens`,
+  `completionTokens`, `totalTokens`, and `cachedTokens` (read from the
+  OpenAI-shaped `usage.prompt_tokens_details.cached_tokens` field, when
+  the backend returns it) after every call, so cache effectiveness can
+  be verified from the logs rather than assumed. `cachedTokens` being
+  consistently `null`/`0` across repeated same-prefix calls means the
+  backend either does not have prefix caching enabled or does not
+  expose this field, not that the client is doing anything wrong.
+
+This is currently implemented for the Azure Foundry provider only, per
+explicit request; `OllamaToolCallingModelClient` sends the same
+provider-neutral `messages`/`tools` but does not have equivalent
+usage/cache logging.
+
 The model selects a tool. It never executes it. The application validates
 the tool call and, for CATIA executor tools, returns it to the .NET
 executor.
