@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Protocol
 
 import httpx
-import ollama
 
 from catia_agent.config import Settings, settings
 from catia_agent.logging_config import get_logger
@@ -73,63 +71,6 @@ class ToolCallingModelClient(Protocol):
 
 
 # -------------------------------------------------------------------------
-# Ollama implementation (local development)
-# -------------------------------------------------------------------------
-
-class OllamaToolCallingModelClient:
-    """
-    Local Ollama implementation, used for offline development.
-    """
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model_name: str,
-        timeout_seconds: float,
-        temperature: float,
-    ) -> None:
-        self._model_name = model_name
-        self._timeout_seconds = timeout_seconds
-        self._temperature = temperature
-
-        self._client = ollama.AsyncClient(
-            host=base_url
-        )
-
-    async def select_tool(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-    ) -> Any:
-        try:
-            async with asyncio.timeout(
-                self._timeout_seconds
-            ):
-                return await self._client.chat(
-                    model=self._model_name,
-                    messages=messages,
-                    tools=tools,
-                    think=False,
-                    options={
-                        "temperature": (
-                            self._temperature
-                        ),
-                    },
-                )
-
-        except TimeoutError as exc:
-            raise ModelProviderTimeoutError(
-                "The model did not respond within "
-                f"{self._timeout_seconds} seconds."
-            ) from exc
-
-    async def aclose(self) -> None:
-        await self._client.close()
-
-
-# -------------------------------------------------------------------------
 # Azure AI Foundry implementation (cloud-hosted Qwen 3.6 27B)
 # -------------------------------------------------------------------------
 
@@ -148,8 +89,8 @@ class AzureFoundryToolCallingModelClient:
     Targets the OpenAI-compatible chat-completions endpoint exposed by
     an Azure AI Foundry serverless (Models-as-a-Service) deployment,
     authenticated with a bearer token. tool_choice is forced to
-    "required" so, unlike Ollama, the model structurally cannot return
-    zero tool calls on a well-formed request.
+    "required" so the model structurally cannot return zero tool calls
+    on a well-formed request.
     """
 
     def __init__(
@@ -312,65 +253,50 @@ def build_model_client(
     application_settings: Settings,
 ) -> ToolCallingModelClient:
     """
-    Construct the ToolCallingModelClient selected by
-    application_settings.model_provider.
+    Construct the Azure AI Foundry ToolCallingModelClient.
 
     Callers outside this module should depend on the returned
     protocol, not on the concrete provider type.
     """
 
-    if application_settings.model_provider == "azure_foundry":
-        if (
-            application_settings.azure_foundry_endpoint is None
-            or application_settings.azure_foundry_api_key is None
-            or application_settings.azure_foundry_deployment_name
-            is None
-        ):
-            raise ValueError(
-                "model_provider is 'azure_foundry' but the Azure "
-                "AI Foundry settings are incomplete."
-            )
-
-        return AzureFoundryToolCallingModelClient(
-            endpoint=application_settings.azure_foundry_endpoint,
-            api_key=(
-                application_settings
-                .azure_foundry_api_key
-                .get_secret_value()
-            ),
-            deployment_name=(
-                application_settings
-                .azure_foundry_deployment_name
-            ),
-            api_version=(
-                application_settings.azure_foundry_api_version
-            ),
-            timeout_seconds=(
-                application_settings
-                .azure_foundry_request_timeout_seconds
-            ),
-            temperature=application_settings.model_temperature,
-            max_tokens=application_settings.azure_foundry_max_tokens,
-            enable_thinking=(
-                application_settings.azure_foundry_enable_thinking
-            ),
+    if (
+        application_settings.azure_foundry_endpoint is None
+        or application_settings.azure_foundry_api_key is None
+        or application_settings.azure_foundry_deployment_name
+        is None
+    ):
+        raise ValueError(
+            "The Azure AI Foundry settings are incomplete."
         )
 
-    return OllamaToolCallingModelClient(
-        base_url=application_settings.ollama_base_url,
-        model_name=application_settings.ollama_model,
+    return AzureFoundryToolCallingModelClient(
+        endpoint=application_settings.azure_foundry_endpoint,
+        api_key=(
+            application_settings
+            .azure_foundry_api_key
+            .get_secret_value()
+        ),
+        deployment_name=(
+            application_settings
+            .azure_foundry_deployment_name
+        ),
+        api_version=(
+            application_settings.azure_foundry_api_version
+        ),
         timeout_seconds=(
-            application_settings.ollama_request_timeout_seconds
+            application_settings
+            .azure_foundry_request_timeout_seconds
         ),
         temperature=application_settings.model_temperature,
+        max_tokens=application_settings.azure_foundry_max_tokens,
+        enable_thinking=(
+            application_settings.azure_foundry_enable_thinking
+        ),
     )
 
 
-# Process-lifetime singleton: constructed once so the underlying HTTP
-# connection (httpx.AsyncClient for Azure, ollama.AsyncClient for
-# Ollama) is reused across every planning turn instead of being
-# recreated per request. app.py's lifespan shutdown hook closes it via
-# aclose() when present.
+# Process-lifetime singleton so the httpx connection pool is reused
+# across planning turns; app.py's lifespan closes it via aclose().
 model_client: ToolCallingModelClient = build_model_client(settings)
 
 MODEL_NAME = settings.active_model_name

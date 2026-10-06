@@ -1,9 +1,14 @@
+import asyncio
 from uuid import uuid4
 
 import pytest
 
+import catia_agent.graph as graph_module
 from catia_agent.graph import (
+    AgentRunNotFoundError,
+    AgentRunStateConflictError,
     _classify_planning_mode,
+    get_session_id_for_run,
     resume_catia_agent,
     start_catia_agent,
 )
@@ -1100,4 +1105,175 @@ async def test_sequence_is_capped_at_max_actions_per_run(
     assert pending["status"] == "unsupported_request"
     assert "maximum number of CATIA actions" in pending["message"]
     assert len(pending["completedActions"]) == 2
+
+
+# ---------------------------------------------------------
+# Session robustness: concurrency, expiry, interruption
+# ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_concurrent_start_on_same_session_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_planner = asyncio.Event()
+
+    async def slow_plan_catia_action(*args, **kwargs):
+        await release_planner.wait()
+        return _open_action_result()
+
+    monkeypatch.setattr(
+        "catia_agent.graph_nodes.plan_catia_action",
+        slow_plan_catia_action,
+    )
+
+    session_id = str(uuid4())
+
+    first = asyncio.create_task(
+        start_catia_agent(
+            session_id=session_id,
+            user_message="Open the gearbox.",
+        )
+    )
+    await asyncio.sleep(0)
+
+    with pytest.raises(AgentRunStateConflictError):
+        await start_catia_agent(
+            session_id=session_id,
+            user_message="Open the gearbox.",
+        )
+
+    release_planner.set()
+    assert (await first)["status"] == "action_required"
+
+
+@pytest.mark.asyncio
+async def test_non_action_runs_do_not_leak_run_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(
+        monkeypatch,
+        NonAgenticResult(
+            status="non_agentic",
+            message="Route this to the general chat service.",
+        ),
+    )
+
+    response = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="What is a pad?",
+    )
+
+    assert get_session_id_for_run(response["runId"]) is None
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_run_releases_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(monkeypatch, _open_action_result())
+    session_id = str(uuid4())
+
+    stale = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox.",
+    )
+
+    with pytest.raises(AgentRunStateConflictError):
+        await start_catia_agent(
+            session_id=session_id,
+            user_message="Open the gearbox.",
+        )
+
+    monkeypatch.setattr(
+        "catia_agent.graph_session.settings.pending_run_timeout_seconds",
+        -1,
+    )
+
+    fresh = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox.",
+    )
+
+    assert fresh["status"] == "action_required"
+    assert fresh["runId"] != stale["runId"]
+
+    with pytest.raises(AgentRunNotFoundError):
+        await resume_catia_agent(
+            run_id=stale["runId"],
+            action_result=ActionExecutionResultRequest(
+                actionId=stale["actionId"],
+                success=True,
+                data={"documentName": "Gearbox.CATProduct"},
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_expired_pending_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(monkeypatch, _open_action_result())
+    session_id = str(uuid4())
+
+    pending = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox.",
+    )
+
+    monkeypatch.setattr(
+        "catia_agent.graph_session.settings.pending_run_timeout_seconds",
+        -1,
+    )
+
+    with pytest.raises(AgentRunNotFoundError):
+        await resume_catia_agent(
+            run_id=pending["runId"],
+            action_result=ActionExecutionResultRequest(
+                actionId=pending["actionId"],
+                success=True,
+                data={"documentName": "Gearbox.CATProduct"},
+            ),
+        )
+
+    assert get_session_id_for_run(pending["runId"]) is None
+
+
+@pytest.mark.asyncio
+async def test_interrupted_start_does_not_lock_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_planner(monkeypatch, _open_action_result())
+
+    real_ainvoke = graph_module.catia_agent_graph.ainvoke
+    calls = {"count": 0}
+
+    # Simulate the request timeout firing right after the graph paused,
+    # so the client never received the actionId.
+    async def ainvoke_then_cancel_once(*args, **kwargs):
+        result = await real_ainvoke(*args, **kwargs)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise asyncio.CancelledError()
+        return result
+
+    monkeypatch.setattr(
+        graph_module.catia_agent_graph,
+        "ainvoke",
+        ainvoke_then_cancel_once,
+    )
+
+    session_id = str(uuid4())
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_catia_agent(
+            session_id=session_id,
+            user_message="Open the gearbox.",
+        )
+
+    response = await start_catia_agent(
+        session_id=session_id,
+        user_message="Open the gearbox.",
+    )
+
+    assert response["status"] == "action_required"
 

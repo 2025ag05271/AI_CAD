@@ -23,9 +23,15 @@ from catia_agent.graph_nodes import (
 )
 from catia_agent.graph_responses import _new_identifier
 from catia_agent.graph_session import (
+    _abandon_pending_run,
+    _abandon_run_if_paused,
     _build_current_response,
+    _exclusive_session,
+    _forget_run_unless_paused,
     _get_existing_state,
+    _is_pending_action_expired,
     _is_waiting_for_action_result,
+    _release_or_reject_pending_run,
     _run_sessions,
     _thread_config,
     get_session_id_for_run,
@@ -56,14 +62,9 @@ from catia_agent.models import (
 
 logger = get_logger(__name__)
 
-# Re-exported for backward compatibility: callers outside this module
-# (app.py, tests) import these directly from catia_agent.graph. The
-# actual definitions live in the graph_state/graph_session/
-# graph_classification modules imported above, which were split out of
-# this file to keep every graph_* module under ~400 lines. See those
-# modules for the definitions of AgentRunStateConflictError,
-# AgentRunNotFoundError, CatiaAgentState, TERMINAL_READ_ONLY_TOOLS, and
-# get_session_id_for_run.
+# AgentRunStateConflictError, AgentRunNotFoundError, CatiaAgentState,
+# TERMINAL_READ_ONLY_TOOLS and get_session_id_for_run are re-exported
+# here for app.py and tests; they live in the graph_* modules above.
 
 
 # -------------------------------------------------------------------------
@@ -220,22 +221,31 @@ async def start_catia_agent(
     user_message: str,
     catia_context: CatiaContext | None = None,
 ) -> dict[str, Any]:
+    async with _exclusive_session(session_id):
+        return await _start_run(
+            session_id,
+            user_message,
+            catia_context,
+        )
+
+
+async def _start_run(
+    session_id: str,
+    user_message: str,
+    catia_context: CatiaContext | None,
+) -> dict[str, Any]:
     existing_state = _get_existing_state(
         catia_agent_graph,
         session_id,
     )
 
-    if _is_waiting_for_action_result(
-        existing_state
-    ):
-        raise AgentRunStateConflictError(
-            "This session already has an Agent run "
-            "waiting for a CATIA action result."
-        )
+    _release_or_reject_pending_run(
+        catia_agent_graph,
+        session_id,
+        existing_state,
+    )
 
     run_id = _new_identifier()
-
-    _run_sessions[run_id] = session_id
 
     run_token = run_id_context.set(
         run_id
@@ -263,11 +273,11 @@ async def start_catia_agent(
         },
     )
 
-    is_agentic = await is_agentic_request(
-        user_message
-    )
-
     try:
+        is_agentic = await is_agentic_request(
+            user_message
+        )
+
         initial_state: CatiaAgentState = {
             "session_id": session_id,
             "run_id": run_id,
@@ -295,23 +305,46 @@ async def start_catia_agent(
             ),
             "completed_actions": [],
             "final_response": None,
+            # Clear leftovers from the previous run on this thread so a
+            # failure mid-run can't make the session look paused.
+            "planner_result": None,
+            "pending_action": None,
+            "action_id": None,
+            "action_result": None,
+            "action_requested_at": None,
         }
 
-        await catia_agent_graph.ainvoke(
-            initial_state,
-            config=_thread_config(
-                session_id
-            ),
-        )
+        try:
+            await catia_agent_graph.ainvoke(
+                initial_state,
+                config=_thread_config(
+                    session_id
+                ),
+            )
+
+        except BaseException:
+            # e.g. the request timeout cancelled us after the graph had
+            # already paused: the client never got the actionId.
+            _abandon_run_if_paused(
+                catia_agent_graph,
+                session_id,
+                run_id,
+            )
+            raise
 
         current_state = _get_existing_state(
             catia_agent_graph,
             session_id,
         )
 
-        return _build_current_response(
+        response = _build_current_response(
             current_state
         )
+
+        if response["status"] == "action_required":
+            _run_sessions[run_id] = session_id
+
+        return response
 
     finally:
         run_id_context.reset(
@@ -333,6 +366,19 @@ async def resume_catia_agent(
             f"'{run_id}'."
         )
 
+    async with _exclusive_session(session_id):
+        return await _resume_run(
+            run_id,
+            session_id,
+            action_result,
+        )
+
+
+async def _resume_run(
+    run_id: str,
+    session_id: str,
+    action_result: ActionExecutionResultRequest,
+) -> dict[str, Any]:
     existing_state = _get_existing_state(
         catia_agent_graph,
         session_id,
@@ -354,6 +400,20 @@ async def resume_catia_agent(
             "for a CATIA action result."
         )
 
+    if _is_pending_action_expired(existing_state):
+        _abandon_pending_run(
+            catia_agent_graph,
+            session_id,
+            existing_state,
+            reason="expired",
+        )
+
+        raise AgentRunNotFoundError(
+            f"The Agent run '{run_id}' expired after waiting "
+            f"more than {settings.pending_run_timeout_seconds} "
+            "seconds for a CATIA action result."
+        )
+
     expected_action_id = existing_state.get(
         "action_id"
     )
@@ -373,16 +433,25 @@ async def resume_catia_agent(
     )
 
     try:
-        await catia_agent_graph.ainvoke(
-            Command(
-                resume=action_result.model_dump(
-                    mode="json"
-                )
-            ),
-            config=_thread_config(
-                session_id
-            ),
-        )
+        try:
+            await catia_agent_graph.ainvoke(
+                Command(
+                    resume=action_result.model_dump(
+                        mode="json"
+                    )
+                ),
+                config=_thread_config(
+                    session_id
+                ),
+            )
+
+        except BaseException:
+            _forget_run_unless_paused(
+                catia_agent_graph,
+                session_id,
+                run_id,
+            )
+            raise
 
         current_state = _get_existing_state(
             catia_agent_graph,

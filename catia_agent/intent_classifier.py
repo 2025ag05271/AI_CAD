@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any
 
 import numpy as np
@@ -21,9 +22,8 @@ logger = get_logger(__name__)
 # ("agentic") or a general/informational message, using a local Ollama
 # embedding model (qllama/bge-small-en-v1.5 by default) instead of
 # spending a model round trip on that decision. Adapted from
-# tests/bge_embedding_test.py. This is independent of model_provider:
-# it always talks to the local Ollama install for embeddings, even
-# when the chat model_provider is azure_foundry.
+# tests/bge_embedding_test.py. Local Ollama is used only for these
+# embeddings; the tool-calling model is always Azure AI Foundry.
 # -------------------------------------------------------------------------
 
 AGENTIC_INTENT = "catia_agent_command"
@@ -239,6 +239,10 @@ embeddings = OllamaEmbeddings(
 _intent_matrices: dict[str, np.ndarray] | None = None
 _intent_matrices_lock = asyncio.Lock()
 
+# Monotonic deadline before which the classifier is skipped after a
+# failure, so an unavailable Ollama doesn't cost every request a timeout.
+_classifier_unavailable_until: float = 0.0
+
 
 async def _get_intent_matrices() -> dict[str, np.ndarray]:
     global _intent_matrices
@@ -271,24 +275,44 @@ async def classify_request_intent(
     """
     Classify a message as AGENTIC_INTENT or NON_AGENTIC_INTENT.
 
-    Returns None if the local Ollama embedding call failed (for
-    example, Ollama is not running), so callers can fall back to
+    Returns None if the local Ollama embedding call failed, timed out,
+    or is in its post-failure cooldown, so callers can fall back to
     letting the model decide instead of failing the request.
     """
 
+    global _classifier_unavailable_until
+
+    if time.monotonic() < _classifier_unavailable_until:
+        return None
+
     try:
-        matrices = await _get_intent_matrices()
-        query_vector = _normalize(
-            np.asarray(
-                await embeddings.aembed_query(
-                    _strip_file_paths(user_message)
+        async with asyncio.timeout(
+            settings.intent_classifier_timeout_seconds
+        ):
+            matrices = await _get_intent_matrices()
+            query_vector = _normalize(
+                np.asarray(
+                    await embeddings.aembed_query(
+                        _strip_file_paths(user_message)
+                    )
                 )
             )
+
+    except Exception as exc:
+        _classifier_unavailable_until = (
+            time.monotonic()
+            + settings.intent_classifier_failure_cooldown_seconds
         )
 
-    except Exception:
-        logger.exception(
-            "intent_classifier_embedding_failed"
+        logger.warning(
+            "intent_classifier_embedding_failed",
+            extra={
+                "exceptionType": type(exc).__name__,
+                "cooldownSeconds": (
+                    settings
+                    .intent_classifier_failure_cooldown_seconds
+                ),
+            },
         )
         return None
 

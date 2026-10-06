@@ -14,14 +14,14 @@ then resumes the workflow with the execution result.
 The Python backend does not execute CATIA COM automation. CATIA operations
 remain in the external .NET application.
 
-The model provider is selected by `CATIA_AGENT_MODEL_PROVIDER` and
-implemented behind a provider-neutral `ToolCallingModelClient` protocol
-(see `catia_agent/model_providers.py`), so switching providers never
-changes the graph, MCP catalog, API contracts, or validation policy.
-Local development defaults to a local Ollama installation; the intended
-production provider is Qwen 3.6 27B hosted on Azure AI Foundry, reached
-over an OpenAI-compatible chat-completions endpoint with bearer-token
-authentication. See Sections 4 and 9.
+The tool-calling model is Qwen 3.6 27B hosted on Azure AI Foundry,
+reached over an OpenAI-compatible chat-completions endpoint with
+bearer-token authentication. It sits behind a provider-neutral
+`ToolCallingModelClient` protocol (see `catia_agent/model_providers.py`),
+so a future provider change would not touch the graph, MCP catalog, API
+contracts, or validation policy. Ollama is no longer used for chat; a
+local Ollama install is used only for the embedding-based ask-vs-agent
+classifier (Section 8.1). See Sections 4 and 9.
 
 ## 2. High-level architecture
 
@@ -41,8 +41,9 @@ LangGraph workflow
     |                       +--> Descriptions
     |                       +--> JSON input schemas
     |
-    +--> ToolCallingModelClient --> Ollama :11434 (dev)
-    |                            --> Azure AI Foundry (prod) --> Qwen 3.6 27B
+    +--> Embedding classifier --> local Ollama :11434 (bge-small, embeddings only)
+    |
+    +--> ToolCallingModelClient --> Azure AI Foundry --> Qwen 3.6 27B
     |                                                    |
     |                                                    +--> Native tool call
     |
@@ -67,13 +68,12 @@ completed or execution_failed response
   completion of Agent runs.
 - **MCP server** is the authoritative catalog of approved CATIA executor
   tool names, descriptions, and argument schemas.
-- **ToolCallingModelClient** is a provider-neutral interface implemented
-  by `OllamaToolCallingModelClient` (local development) and
-  `AzureFoundryToolCallingModelClient` (Qwen 3.6 27B on Azure AI
-  Foundry); `CATIA_AGENT_MODEL_PROVIDER` selects which one is wired up,
-  with no changes to the rest of the codebase.
-- **Ollama** provides the local development tool-calling model.
-  **Azure AI Foundry** provides the production tool-calling model.
+- **ToolCallingModelClient** is a provider-neutral interface, currently
+  implemented only by `AzureFoundryToolCallingModelClient` (Qwen 3.6 27B
+  on Azure AI Foundry).
+- **Ollama** (local) serves only the bge-small embedding model used by
+  the ask-vs-agent classifier. It is optional: if it is down, the
+  classifier is skipped and the model decides.
 - **Pydantic** validates API payloads, orchestrator and executor tool
   calls, CATIA context, and external execution results.
 - **The .NET client** remains the final executor and calls the CATIA COM
@@ -84,14 +84,13 @@ completed or execution_failed response
 ```text
 FastAPI Agent API    http://127.0.0.1:8000
 CATIA MCP server     http://127.0.0.1:8001/mcp
-Ollama API           http://127.0.0.1:11434 (CATIA_AGENT_MODEL_PROVIDER=ollama)
+Ollama API           http://127.0.0.1:11434 (embeddings only)
 FastAPI Swagger      http://127.0.0.1:8000/docs
 FastAPI OpenAPI      http://127.0.0.1:8000/openapi.json
 ```
 
-When `CATIA_AGENT_MODEL_PROVIDER=azure_foundry`, the model endpoint is
-the configured `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT` instead of the local
-Ollama URL; there is no fixed local port for it.
+The tool-calling model endpoint is the configured
+`CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`; there is no local port for it.
 
 All development services are bound to loopback addresses. In production
 `enable_api_docs` is disabled by policy (see Section 6), and `/docs`,
@@ -108,11 +107,9 @@ All development services are bound to loopback addresses. In production
 - FastMCP
 - httpx (Azure AI Foundry HTTP client)
 - truststore (uses the OS certificate store for TLS verification, required behind TLS-inspecting corporate proxies)
-- Ollama Python client
-- Ollama for Windows (local development)
-- Qwen 3.6 27B on Azure AI Foundry (production model)
+- Qwen 3.6 27B on Azure AI Foundry (tool-calling model)
 - langchain-ollama + NumPy (embedding-based ask-vs-agent intent classifier, Section 8.1)
-- qllama/bge-small-en-v1.5 pulled in local Ollama (embedding model; required even when CATIA_AGENT_MODEL_PROVIDER is azure_foundry)
+- qllama/bge-small-en-v1.5 pulled in local Ollama (embedding model only)
 
 Environment setup used for development:
 
@@ -124,7 +121,7 @@ conda activate catia-agent
 Typical dependencies:
 
 ```powershell
-python -m pip install ollama pydantic pydantic-settings
+python -m pip install pydantic pydantic-settings
 python -m pip install fastapi "uvicorn[standard]" langgraph
 python -m pip install "fastmcp>=3.4,<4"
 python -m pip install httpx
@@ -192,8 +189,9 @@ catia-agent-poc/
 ```
 
 Automated tests live under `tests/` and are run with `pytest` (configured
-by `pytest.ini`). Tests marked `integration` require a local Ollama and the
-CATIA MCP server; the rest run without them. `show_graph.py` remains useful
+by `pytest.ini`). Tests marked `integration` require a local Ollama
+(embeddings), the Azure AI Foundry endpoint, and the CATIA MCP server;
+the rest run without them. `show_graph.py` remains useful
 for visualizing the compiled LangGraph, and Swagger and Postman are the
 recommended way to exercise the API end-to-end.
 
@@ -219,25 +217,20 @@ CATIA_AGENT_API_HOST=127.0.0.1
 CATIA_AGENT_API_PORT=8000
 CATIA_AGENT_API_PREFIX=/api/v1
 CATIA_AGENT_ENABLE_API_DOCS=true
-CATIA_AGENT_REQUEST_TIMEOUT_SECONDS=60
+CATIA_AGENT_REQUEST_TIMEOUT_SECONDS=120
 CATIA_AGENT_REQUEST_BODY_MAX_BYTES=1048576
 
 CATIA_AGENT_MAX_USER_MESSAGE_CHARACTERS=10000
 CATIA_AGENT_MAX_SESSION_ID_CHARACTERS=128
 CATIA_AGENT_MAX_REQUEST_ID_CHARACTERS=128
 
-CATIA_AGENT_MODEL_PROVIDER=azure_foundry
 CATIA_AGENT_MODEL_TEMPERATURE=0
-
-CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
-CATIA_AGENT_OLLAMA_MODEL=gemma4:latest
-CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS=60
 
 CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT=
 CATIA_AGENT_AZURE_FOUNDRY_API_KEY=
 CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME=qwen3.6-27b-instruct
 CATIA_AGENT_AZURE_FOUNDRY_API_VERSION=2024-05-01-preview
-CATIA_AGENT_AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS=60
+CATIA_AGENT_AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS=45
 CATIA_AGENT_AZURE_FOUNDRY_MAX_TOKENS=2048
 CATIA_AGENT_AZURE_FOUNDRY_ENABLE_THINKING=false
 
@@ -247,7 +240,10 @@ CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
 CATIA_AGENT_READINESS_FORCE_MCP_REFRESH=false
 
 CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=true
+CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
 CATIA_AGENT_INTENT_CLASSIFIER_MODEL=qllama/bge-small-en-v1.5
+CATIA_AGENT_INTENT_CLASSIFIER_TIMEOUT_SECONDS=5
+CATIA_AGENT_INTENT_CLASSIFIER_FAILURE_COOLDOWN_SECONDS=30
 CATIA_AGENT_INTENT_CLASSIFIER_TOP_K=3
 CATIA_AGENT_INTENT_CLASSIFIER_AGENTIC_THRESHOLD=0.48
 CATIA_AGENT_INTENT_CLASSIFIER_AGENTIC_MARGIN=0.03
@@ -257,7 +253,7 @@ CATIA_AGENT_ENABLE_CONVERSATION_HISTORY=false
 CATIA_AGENT_MAX_ACTIONS_PER_RUN=20
 CATIA_AGENT_ENABLE_MULTI_ACTION_SEQUENCES=false
 CATIA_AGENT_MAX_COMPLETED_ACTION_RESULT_BYTES=262144
-CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS=1800
+CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS=3600
 
 CATIA_AGENT_LOG_LEVEL=INFO
 CATIA_AGENT_ENABLE_JSON_LOGS=true
@@ -275,19 +271,39 @@ CATIA_AGENT_ADMIN_API_KEY=
 - Settings are cached for the life of the Python process. Restart the
   application after changing environment variables.
 - Do not hard-code model names or service URLs across modules.
-- `CATIA_AGENT_MODEL_PROVIDER` defaults to `azure_foundry`. This requires
-  `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`, `CATIA_AGENT_AZURE_FOUNDRY_API_KEY`,
-  and `CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME` to be filled in;
+- `CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`, `CATIA_AGENT_AZURE_FOUNDRY_API_KEY`,
+  and `CATIA_AGENT_AZURE_FOUNDRY_DEPLOYMENT_NAME` are required;
   `Settings.validate_model_provider_configuration` fails fast at startup
-  if `azure_foundry` is selected while any of those three are empty.
-  Switch it to `ollama` for offline local development with no external
-  network dependency (no Azure settings required in that case).
+  if any of them is empty.
 - `CATIA_AGENT_AZURE_FOUNDRY_API_KEY` is a bearer token, stored as a
   Pydantic `SecretStr` and included in the logging redaction list; never
   print or log it directly.
 - `CATIA_AGENT_ENABLE_CONVERSATION_HISTORY` (default `false`) and
   `CATIA_AGENT_ENABLE_MULTI_ACTION_SEQUENCES` (default `false`) are
   independent switches described in Section 8.2.
+
+### Timeout hierarchy
+
+CATIA execution never happens inside an HTTP request to this backend:
+`POST /agent/runs` returns `action_required` as soon as an action is
+planned, .NET executes it (however long it takes), then calls
+`POST .../action-results`. Two separate budgets therefore apply:
+
+| Setting | Default | Bounds |
+| --- | --- | --- |
+| `INTENT_CLASSIFIER_TIMEOUT_SECONDS` | 5 | Local embedding call |
+| `MCP_REQUEST_TIMEOUT_SECONDS` | 15 | MCP tool discovery |
+| `AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS` | 45 | One model call (up to 2 per request with the duplicate-action retry) |
+| `REQUEST_TIMEOUT_SECONDS` | 120 | Whole HTTP request (planning only) |
+| .NET `CatiaAgent:RequestTimeout` | 00:02:30 | .NET `HttpClient` call to FastAPI |
+| `PENDING_RUN_TIMEOUT_SECONDS` | 3600 | Time a run may wait for .NET to report a CATIA result |
+
+Each layer must be strictly longer than the layer inside it, so the
+inner timeout always fires first and produces a precise error code.
+`Settings.validate_timeout_hierarchy` refuses to start if
+`REQUEST_TIMEOUT_SECONDS` is not greater than
+`classifier + MCP + 2 x model`. Raise `PENDING_RUN_TIMEOUT_SECONDS` (not
+the HTTP timeouts) if a CATIA operation can run longer than an hour.
 
 ### Environment policy
 
@@ -334,12 +350,13 @@ Runs the configured `ReadinessCheck` implementations concurrently and
 returns `200` when every check reports `available`, otherwise `503`.
 The current checks verify:
 
-- The model provider is reachable and the configured model is installed.
+- The Azure AI Foundry endpoint accepts an authenticated one-token
+  chat-completion request (`AzureFoundryReadinessCheck`).
 - The CATIA MCP server is reachable and exposes at least one usable tool.
 
-The Ollama readiness check is implemented by `OllamaReadinessCheck` and
-can be swapped for an Azure equivalent without changing the aggregate
-report (see `catia_agent/readiness.py`).
+The local Ollama embedding service is deliberately not a readiness
+dependency: the classifier degrades to model-based routing when it is
+unavailable.
 
 ### Tool diagnostics
 
@@ -538,19 +555,18 @@ Stable error codes produced by the API:
 | 400  | `INVALID_CONTENT_LENGTH`         | request middleware               | The`Content-Length` header could not be parsed.                                        |
 | 401  | `ADMIN_API_KEY_REQUIRED`         | admin dependency                 | An admin endpoint was called without`X-Admin-API-Key`.                                 |
 | 403  | `ADMIN_API_KEY_INVALID`          | admin dependency                 | The supplied admin key did not match (constant-time compare).                            |
-| 404  | `AGENT_RUN_NOT_FOUND`            | action-results                   | No pending run matches the supplied`runId`.                                            |
+| 404  | `AGENT_RUN_NOT_FOUND`            | action-results                   | No pending run matches the supplied`runId`, or it expired after `CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS`. |
 | 409  | `AGENT_RUN_STATE_CONFLICT`       | `/agent/runs`, action-results  | The session or run is not in a state compatible with the request (see Section 8).        |
 | 413  | `REQUEST_BODY_TOO_LARGE`         | request middleware               | Request body exceeds`CATIA_AGENT_REQUEST_BODY_MAX_BYTES`.                              |
 | 422  | `REQUEST_VALIDATION_FAILED`      | FastAPI request validation       | The submitted payload did not match the API contract.                                    |
 | 422  | `MODEL_SCHEMA_VALIDATION_FAILED` | planner and record-action-result | The model returned a tool call or the executor returned a result that failed Pydantic.   |
 | 500  | `INTERNAL_SERVER_ERROR`          | request middleware               | An unhandled exception was caught. Logged with a stack trace, not exposed to the client. |
 | 503  | `MCP_REQUEST_FAILED`             | any endpoint that touches MCP    | The CATIA MCP tool service was unreachable or returned an invalid catalog.               |
-| 503  | `MODEL_PROVIDER_FAILED`          | planner                          | The configured tool-calling model provider failed (non-timeout).                         |
-| 503  | `OLLAMA_REQUEST_FAILED`          | planner                          | Ollama returned an error while the current provider was making a request.                |
-| 504  | `MODEL_REQUEST_TIMED_OUT`        | planner                          | The model did not respond within`CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS`.          |
+| 503  | `MODEL_PROVIDER_FAILED`          | planner                          | The Azure AI Foundry model endpoint failed (non-timeout).                                |
+| 504  | `MODEL_REQUEST_TIMED_OUT`        | planner                          | The model did not respond within`CATIA_AGENT_AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS`.   |
 | 504  | `REQUEST_TIMED_OUT`              | request middleware               | The request did not complete within`CATIA_AGENT_REQUEST_TIMEOUT_SECONDS`.              |
 
-`AGENT_RUN_STATE_CONFLICT` is deliberately narrow — only the three
+`AGENT_RUN_STATE_CONFLICT` is deliberately narrow — only the four
 run-state guards enumerated in Section 8 raise it. All other failures
 surfaced from resume paths (planner failures, MCP outage, model outage,
 unknown-tool rejection) map to their own dedicated codes above.
@@ -679,11 +695,10 @@ That ask-vs-agent decision is made in two stages:
    general-chat score), the run proceeds to the model as normal. If it
    confidently scores as general/informational, `plan_action_node`
    returns a `non_agentic` result immediately and **the model is never
-   called for that turn** — this is a full Azure Foundry/Ollama chat
-   round trip saved per non-agentic message. This step requires a
-   local Ollama install with the embedding model pulled, even when
-   `CATIA_AGENT_MODEL_PROVIDER` is `azure_foundry`, since embeddings
-   always run locally regardless of the chat provider.
+   called for that turn** — this is a full Azure Foundry chat
+   round trip saved per non-agentic message. This step uses a local
+   Ollama install with the embedding model pulled; Ollama is used for
+   nothing else.
 
    Long, unusual absolute file paths (real CATIA files can live many
    folders deep, for example under a synced OneDrive tree) dilute the
@@ -701,10 +716,12 @@ That ask-vs-agent decision is made in two stages:
    embedding classifier is disabled
    (`CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=false`), if it is
    uncertain (score below the threshold/margin), or if the local
-   Ollama embedding call fails for any reason (for example, Ollama is
-   not running), the run falls back to today's behavior: the model
-   makes the routing decision through a tool call and never answers
-   the user directly.
+   Ollama embedding call fails or exceeds
+   `CATIA_AGENT_INTENT_CLASSIFIER_TIMEOUT_SECONDS` (default 5s), the
+   run falls back to letting the model make the routing decision
+   through a tool call. After a failure the classifier is skipped for
+   `CATIA_AGENT_INTENT_CLASSIFIER_FAILURE_COOLDOWN_SECONDS` (default
+   30s), so an Ollama outage doesn't add latency to every request.
 
 - If the model selects a CATIA MCP tool, the request is agentic. It
   proceeds through `prepare_action` → `await_action_result` →
@@ -965,12 +982,15 @@ never carried over into session-level `messages` history.
 Because the thread is keyed by `sessionId` rather than `runId`, the
 action-results endpoint (which only receives a `runId`) resolves the
 owning session through an in-memory `runId -> sessionId` map in
-`graph.py`. Three run-state guards raise
+`graph.py`. Four run-state guards raise
 `AgentRunStateConflictError`, which the API surfaces as HTTP 409 with
 `errorCode: AGENT_RUN_STATE_CONFLICT`:
 
 - Starting a new run on `POST /api/v1/agent/runs` while the same session
-  still has a pending action result.
+  still has a pending action result (that has not yet expired).
+- Sending a request for a session while another request for the same
+  session is still being processed (for example, a double-click or a
+  client retry). Requests are not queued; the second one fails fast.
 - Submitting an action result whose `runId` does not match the currently
   pending run for that session.
 - Submitting an action result to a run that is not paused at
@@ -981,6 +1001,26 @@ Any other error surfaced from the resume path (planner validation, MCP
 unavailability, model outage, unknown-tool policy rejection) maps to its
 own dedicated status code and error code (see Section 7.5) so it cannot
 be mistaken for a state conflict.
+
+### Pending-run lifecycle
+
+- A paused run records `action_requested_at`. After
+  `CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS` (default 3600) it is expired:
+  a new `POST /agent/runs` on that session releases it and proceeds, and
+  a late `POST .../action-results` for it returns 404
+  `AGENT_RUN_NOT_FOUND`. Set this above your slowest CATIA operation.
+- If a start request is cancelled after the graph paused (for example,
+  by the request timeout), the client never received the `actionId`, so
+  the pending action is released immediately instead of locking the
+  session. Logged as `pending_run_abandoned`.
+- Every new run clears leftover `pending_action`/`action_id` state from
+  the previous run, so a failure mid-run cannot make the session look
+  paused.
+- The `runId -> sessionId` map only holds runs that are actually waiting
+  for a result; terminal runs are never added or are removed on finish.
+- Executor result `data` larger than
+  `CATIA_AGENT_MAX_COMPLETED_ACTION_RESULT_BYTES` is rejected with 422
+  `REQUEST_VALIDATION_FAILED`.
 
 ### Persistence limitation
 
@@ -1034,14 +1074,8 @@ same shape (an object or dict exposing `message.tool_calls`, each tool
 call exposing `function.name` / `function.arguments`) so `planner.py`
 never branches on provider.
 
-`OllamaToolCallingModelClient` wraps `ollama.AsyncClient`, applies
-`CATIA_AGENT_OLLAMA_REQUEST_TIMEOUT_SECONDS` via `asyncio.timeout`, and
-raises `ModelProviderTimeoutError` on timeout. It is used for local
-development (`CATIA_AGENT_MODEL_PROVIDER=ollama`).
-
-`AzureFoundryToolCallingModelClient` is the production implementation for
-Qwen 3.6 27B hosted on Azure AI Foundry
-(`CATIA_AGENT_MODEL_PROVIDER=azure_foundry`). It POSTs an OpenAI-compatible
+`AzureFoundryToolCallingModelClient` is the only implementation, for
+Qwen 3.6 27B hosted on Azure AI Foundry. It POSTs an OpenAI-compatible
 chat-completions request to `{CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT}/chat/completions`
 over `httpx.AsyncClient`, authenticated with
 `Authorization: Bearer {CATIA_AGENT_AZURE_FOUNDRY_API_KEY}`, and sets
@@ -1052,14 +1086,14 @@ endpoint URL for this single-model serverless deployment, and some
 Azure AI Foundry deployments reject an unexpected `model` value in the
 body. `azure_foundry_deployment_name` is still required in settings —
 it is used for logs, the `/ready` diagnostic payload, and
-`active_model_name`, just not sent on the wire. Unlike Ollama, forcing
+`active_model_name`, just not sent on the wire. Forcing
 `tool_choice: "required"` structurally forces the model to return a
 tool call on every well-formed request, which removes one whole failure
 mode (`MODEL_RETURNED_NO_DECISION` on the very first planning pass)
 that the small local model was prone to. HTTP failures raise
 `AzureFoundryRequestError` (a `ModelProviderError` subclass, so no new
 API error code is introduced) and timeouts raise
-`ModelProviderTimeoutError`, exactly like the Ollama client.
+`ModelProviderTimeoutError`.
 
 The payload also sets `chat_template_kwargs.enable_thinking` from
 `CATIA_AGENT_AZURE_FOUNDRY_ENABLE_THINKING` (default `false`). The vLLM
@@ -1070,14 +1104,13 @@ that is never read (the system prompt already forbids reasoning/free-form
 output) and materially increasing latency and truncation risk. This
 field, when present, is safely ignored — `select_tool` only reads
 `message.tool_calls`, and `_extract_tool_call` already parses
-`function.arguments` whether the provider sends it as a JSON object
-(Ollama) or a JSON-encoded string (this vLLM deployment).
+`function.arguments` whether it arrives as a JSON object or a
+JSON-encoded string (this vLLM deployment).
 
-`build_model_client(settings)` selects and constructs the concrete client
-based on `CATIA_AGENT_MODEL_PROVIDER`; the result is exposed as the
-module-level `model_client`. A future third provider only needs to
-implement `select_tool` and be added to that factory — nothing else in
-the graph, MCP layer, or API contracts changes.
+`build_model_client(settings)` constructs the client; the result is
+exposed as the module-level `model_client`. A future provider only needs
+to implement `select_tool` and be returned from that factory — nothing
+else in the graph, MCP layer, or API contracts changes.
 
 ### 9.1 Prompt/prefix caching (Azure Foundry)
 
@@ -1116,11 +1149,6 @@ maximize KV-cache reuse on the Azure Foundry vLLM backend:
   consistently `null`/`0` across repeated same-prefix calls means the
   backend either does not have prefix caching enabled or does not
   expose this field, not that the client is doing anything wrong.
-
-This is currently implemented for the Azure Foundry provider only, per
-explicit request; `OllamaToolCallingModelClient` sends the same
-provider-neutral `messages`/`tools` but does not have equivalent
-usage/cache logging.
 
 The model selects a tool. It never executes it. The application validates
 the tool call and, for CATIA executor tools, returns it to the .NET
@@ -1387,10 +1415,6 @@ model_selected_unknown_tool
 model_tool_arguments_invalid
 model_request_timed_out
 model_provider_failed
-ollama_request_failed
-ollama_readiness_timed_out
-ollama_readiness_failed
-ollama_model_unavailable
 azure_foundry_request_failed
 azure_foundry_readiness_timed_out
 azure_foundry_readiness_failed
@@ -1410,6 +1434,8 @@ planner_followup_skipped_expected_actions_exhausted
 action_result_received
 agent_run_planned
 agent_run_resumed
+pending_run_abandoned
+intent_classifier_embedding_failed
 ```
 
 Sensitive field names (`authorization`, `apiKey`, `adminApiKey`,
@@ -1434,7 +1460,8 @@ conda activate catia-agent
 python run_api.py
 ```
 
-Ollama normally runs as a native Windows background application.
+Ollama normally runs as a native Windows background application and is
+only needed for the embedding classifier.
 
 Before exercising the Agent, verify:
 

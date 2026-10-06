@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from langgraph.types import interrupt
@@ -250,6 +251,7 @@ def prepare_action_node(
         "action_id": action_id,
         "pending_action": planner_result.action,
         "action_result": None,
+        "action_requested_at": time.time(),
     }
 
 

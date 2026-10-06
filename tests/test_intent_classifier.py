@@ -1,3 +1,5 @@
+import asyncio
+
 import numpy as np
 import pytest
 from types import SimpleNamespace
@@ -20,6 +22,11 @@ def _reset_intent_matrices_cache(
         intent_classifier,
         "_intent_matrices",
         None,
+    )
+    monkeypatch.setattr(
+        intent_classifier,
+        "_classifier_unavailable_until",
+        0.0,
     )
     monkeypatch.setattr(
         intent_classifier,
@@ -274,6 +281,59 @@ async def test_classify_request_intent_returns_none_on_embedding_failure(
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_classify_request_intent_skips_embeddings_during_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    async def failing_aembed_documents(
+        phrases: list[str],
+    ) -> list[list[float]]:
+        calls["count"] += 1
+        raise ConnectionError("Ollama is not reachable.")
+
+    monkeypatch.setattr(
+        intent_classifier,
+        "embeddings",
+        SimpleNamespace(
+            aembed_documents=failing_aembed_documents
+        ),
+    )
+
+    assert await intent_classifier.classify_request_intent("a") is None
+    assert await intent_classifier.classify_request_intent("b") is None
+    assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_classify_request_intent_returns_none_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def hanging_aembed_documents(
+        phrases: list[str],
+    ) -> list[list[float]]:
+        await asyncio.sleep(10)
+        return []
+
+    monkeypatch.setattr(
+        intent_classifier,
+        "embeddings",
+        SimpleNamespace(
+            aembed_documents=hanging_aembed_documents
+        ),
+    )
+    monkeypatch.setattr(
+        intent_classifier.settings,
+        "intent_classifier_timeout_seconds",
+        0.01,
+    )
+
+    assert await intent_classifier.classify_request_intent(
+        "Open the gearbox."
+    ) is None
 
 
 # ---------------------------------------------------------

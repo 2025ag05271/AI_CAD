@@ -469,3 +469,19 @@ def test_action_execution_result_request_defaults() -> None:
     assert result.data is None
     assert result.errorCode is None
     assert result.errorMessage is None
+
+
+def test_action_execution_result_request_rejects_oversized_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "catia_agent.models.settings.max_completed_action_result_bytes",
+        1024,
+    )
+
+    with pytest.raises(ValidationError, match="exceeds the limit"):
+        ActionExecutionResultRequest(
+            actionId="action-001",
+            success=True,
+            data={"blob": "x" * 2048},
+        )

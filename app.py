@@ -15,7 +15,6 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Sequence
 
-import ollama
 from fastapi import (
     APIRouter,
     Depends,
@@ -96,7 +95,6 @@ async def lifespan(
             "version": settings.app_version,
             "environment": settings.environment,
             "apiPrefix": settings.api_prefix,
-            "modelProvider": settings.model_provider,
             "model": settings.active_model_name,
             "mcpServerUrl": (
                 settings.mcp_server_url
@@ -427,34 +425,6 @@ async def handle_model_provider_error(
         message=(
             "The configured model provider is currently "
             "unavailable."
-        ),
-        technical_detail=str(exception),
-    )
-
-
-@app.exception_handler(
-    ollama.ResponseError
-)
-async def handle_ollama_response_error(
-    request: Request,
-    exception: ollama.ResponseError,
-) -> JSONResponse:
-    logger.exception(
-        "ollama_request_failed",
-        extra={
-            "method": request.method,
-            "path": request.url.path,
-        },
-    )
-
-    return create_error_response(
-        request=request,
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        error_status="model_unavailable",
-        error_code="OLLAMA_REQUEST_FAILED",
-        message=(
-            "The local Ollama service could not process "
-            "the model request."
         ),
         technical_detail=str(exception),
     )

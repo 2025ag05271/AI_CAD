@@ -5,7 +5,6 @@ import time
 from typing import Any, Protocol
 
 import httpx
-import ollama
 
 from catia_agent.config import settings
 from catia_agent.logging_config import get_logger
@@ -48,178 +47,6 @@ class ReadinessCheck(Protocol):
         self,
     ) -> dict[str, Any]:
         ...
-
-
-# -------------------------------------------------------------------------
-# Ollama readiness
-# -------------------------------------------------------------------------
-
-class OllamaReadinessCheck:
-    """
-    Verify that Ollama is reachable and the configured model exists.
-
-    This class can later be replaced by an Azure model readiness check
-    without changing the aggregate readiness-report implementation.
-    """
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model_name: str,
-        timeout_seconds: float,
-    ) -> None:
-        self._model_name = model_name
-        self._timeout_seconds = timeout_seconds
-
-        self._client = ollama.AsyncClient(
-            host=base_url
-        )
-
-    @property
-    def name(self) -> str:
-        return "modelProvider"
-
-    async def aclose(self) -> None:
-        await self._client.close()
-
-    async def check(
-        self,
-    ) -> dict[str, Any]:
-        started_at = time.perf_counter()
-
-        try:
-            async with asyncio.timeout(
-                self._timeout_seconds
-            ):
-                response = await self._client.list()
-
-        except TimeoutError:
-            duration_ms = _duration_ms(
-                started_at
-            )
-
-            logger.warning(
-                "ollama_readiness_timed_out",
-                extra={
-                    "timeoutSeconds": (
-                        self._timeout_seconds
-                    ),
-                    "durationMs": duration_ms,
-                },
-            )
-
-            return {
-                "status": "unavailable",
-                "service": "ollama",
-                "message": (
-                    "The local Ollama service did not respond "
-                    "within the configured timeout."
-                ),
-                "durationMs": duration_ms,
-            }
-
-        except Exception as exc:
-            duration_ms = _duration_ms(
-                started_at
-            )
-
-            logger.warning(
-                "ollama_readiness_failed",
-                extra={
-                    "durationMs": duration_ms,
-                    "exceptionType": (
-                        type(exc).__name__
-                    ),
-                },
-            )
-
-            result: dict[str, Any] = {
-                "status": "unavailable",
-                "service": "ollama",
-                "message": (
-                    "The local Ollama service could not be "
-                    "reached."
-                ),
-                "durationMs": duration_ms,
-            }
-
-            if (
-                settings
-                .include_technical_details_in_errors
-            ):
-                result["technicalDetail"] = str(exc)
-
-            return result
-
-        installed_models: list[str] = []
-
-        response_models = getattr(
-            response,
-            "models",
-            [],
-        )
-
-        for model in response_models:
-            model_name = getattr(
-                model,
-                "model",
-                None,
-            )
-
-            if model_name is None:
-                model_name = getattr(
-                    model,
-                    "name",
-                    None,
-                )
-
-            if isinstance(model_name, str):
-                installed_models.append(
-                    model_name
-                )
-
-        model_available = any(
-            installed_model == self._model_name
-            or installed_model.startswith(
-                f"{self._model_name}:"
-            )
-            for installed_model
-            in installed_models
-        )
-
-        duration_ms = _duration_ms(
-            started_at
-        )
-
-        if not model_available:
-            logger.warning(
-                "ollama_model_unavailable",
-                extra={
-                    "model": self._model_name,
-                    "durationMs": duration_ms,
-                },
-            )
-
-            return {
-                "status": "unavailable",
-                "service": "ollama",
-                "model": self._model_name,
-                "message": (
-                    f"The required model "
-                    f"'{self._model_name}' is not installed."
-                ),
-                "installedModels": installed_models,
-                "durationMs": duration_ms,
-            }
-
-        return {
-            "status": "available",
-            "service": "ollama",
-            "model": self._model_name,
-            "installedModels": installed_models,
-            "durationMs": duration_ms,
-        }
 
 
 # -------------------------------------------------------------------------
@@ -503,9 +330,7 @@ _cached_model_provider_readiness_check: ReadinessCheck | None = None
 
 def _build_model_provider_readiness_check() -> ReadinessCheck:
     """
-    Build (or reuse) the readiness check for the currently configured
-    model provider only. Checking an inactive provider would report a
-    misleading dependency failure.
+    Build (or reuse) the Azure AI Foundry readiness check.
 
     The result is cached at module scope so repeated /ready calls reuse
     the same underlying HTTP client instead of opening a new one (and
@@ -515,63 +340,33 @@ def _build_model_provider_readiness_check() -> ReadinessCheck:
     global _cached_model_provider_readiness_check
 
     if _cached_model_provider_readiness_check is not None:
-        logger.debug(
-            "model_provider_readiness_check_reused",
-            extra={"modelProvider": settings.model_provider},
-        )
-
         return _cached_model_provider_readiness_check
 
-    logger.info(
-        "model_provider_readiness_check_initializing",
-        extra={"modelProvider": settings.model_provider},
+    assert settings.azure_foundry_endpoint is not None
+    assert settings.azure_foundry_api_key is not None
+    assert settings.azure_foundry_deployment_name is not None
+
+    check: ReadinessCheck = AzureFoundryReadinessCheck(
+        endpoint=settings.azure_foundry_endpoint,
+        api_key=(
+            settings.azure_foundry_api_key.get_secret_value()
+        ),
+        deployment_name=(
+            settings.azure_foundry_deployment_name
+        ),
+        api_version=settings.azure_foundry_api_version,
+        timeout_seconds=(
+            settings.azure_foundry_request_timeout_seconds
+        ),
     )
 
-    if settings.model_provider == "azure_foundry":
-        assert settings.azure_foundry_endpoint is not None
-        assert settings.azure_foundry_api_key is not None
-        assert settings.azure_foundry_deployment_name is not None
-
-        check: ReadinessCheck = AzureFoundryReadinessCheck(
-            endpoint=settings.azure_foundry_endpoint,
-            api_key=(
-                settings.azure_foundry_api_key.get_secret_value()
-            ),
-            deployment_name=(
-                settings.azure_foundry_deployment_name
-            ),
-            api_version=settings.azure_foundry_api_version,
-            timeout_seconds=(
-                settings.azure_foundry_request_timeout_seconds
-            ),
-        )
-
-        logger.info(
-            "model_provider_readiness_check_initialized",
-            extra={
-                "modelProvider": settings.model_provider,
-                "endpoint": settings.azure_foundry_endpoint,
-                "deploymentName": settings.azure_foundry_deployment_name,
-            },
-        )
-
-    else:
-        check = OllamaReadinessCheck(
-            base_url=settings.ollama_base_url,
-            model_name=settings.ollama_model,
-            timeout_seconds=(
-                settings.ollama_request_timeout_seconds
-            ),
-        )
-
-        logger.info(
-            "model_provider_readiness_check_initialized",
-            extra={
-                "modelProvider": settings.model_provider,
-                "baseUrl": settings.ollama_base_url,
-                "model": settings.ollama_model,
-            },
-        )
+    logger.info(
+        "model_provider_readiness_check_initialized",
+        extra={
+            "endpoint": settings.azure_foundry_endpoint,
+            "deploymentName": settings.azure_foundry_deployment_name,
+        },
+    )
 
     _cached_model_provider_readiness_check = check
     return check

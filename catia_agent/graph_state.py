@@ -54,6 +54,10 @@ class CatiaAgentState(TypedDict, total=False):
     pending_action: CatiaAction
     action_result: ActionExecutionResultRequest
 
+    # Wall-clock epoch seconds (not monotonic) so it stays meaningful
+    # once state is persisted across process restarts.
+    action_requested_at: float | None
+
     completed_actions: list[dict[str, Any]]
     final_response: dict[str, Any]
 

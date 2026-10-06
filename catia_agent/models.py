@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
@@ -569,6 +570,20 @@ class ActionExecutionResultRequest(ApiModel):
             if self.errorMessage is None:
                 raise ValueError(
                     "errorMessage is required when success is false."
+                )
+
+        # data is stored in run state and echoed into planner prompts.
+        if self.data is not None:
+            data_size = len(
+                json.dumps(self.data, default=str).encode("utf-8")
+            )
+
+            if data_size > settings.max_completed_action_result_bytes:
+                raise ValueError(
+                    f"data is {data_size} bytes, which exceeds the "
+                    "limit of "
+                    f"{settings.max_completed_action_result_bytes} "
+                    "bytes."
                 )
 
         return self

@@ -22,15 +22,6 @@ LogLevel = Literal[
     "CRITICAL",
 ]
 
-# The planner talks to whichever provider is selected here through the
-# provider-neutral ToolCallingModelClient protocol (see
-# catia_agent/model_providers.py). Nothing outside config.py and
-# model_providers.py should branch on this value.
-ModelProviderName = Literal[
-    "ollama",
-    "azure_foundry",
-]
-
 
 class Settings(BaseSettings):
     """
@@ -87,8 +78,12 @@ class Settings(BaseSettings):
 
     enable_api_docs: bool = True
 
+    # Whole-request budget for planning only; CATIA execution happens in
+    # .NET between requests and is bounded by pending_run_timeout_seconds.
+    # Must exceed the worst-case sum of inner timeouts (see
+    # validate_timeout_hierarchy).
     request_timeout_seconds: float = Field(
-        default=60.0,
+        default=120.0,
         gt=0,
         le=600,
     )
@@ -122,41 +117,13 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # Model provider selection
-    #
-    # The planner is coupled to the provider-neutral
-    # ToolCallingModelClient protocol (see catia_agent/model_providers.py),
-    # not to any specific provider. This flag selects which concrete
-    # client is wired up at process start; the graph, MCP layer, and API
-    # contracts do not change based on its value.
+    # Tool-calling model
     # ------------------------------------------------------------------
-
-    model_provider: ModelProviderName = "azure_foundry"
 
     model_temperature: float = Field(
         default=0.0,
         ge=0.0,
         le=2.0,
-    )
-
-    # ------------------------------------------------------------------
-    # Ollama provider (local development)
-    # ------------------------------------------------------------------
-
-    ollama_base_url: str = (
-        "http://127.0.0.1:11434"
-    )
-
-    ollama_model: str = Field(
-        default="qwen3:4b",
-        min_length=1,
-        max_length=200,
-    )
-
-    ollama_request_timeout_seconds: float = Field(
-        default=60.0,
-        gt=0,
-        le=600,
     )
 
     # ------------------------------------------------------------------
@@ -192,7 +159,7 @@ class Settings(BaseSettings):
     )
 
     azure_foundry_request_timeout_seconds: float = Field(
-        default=60.0,
+        default=45.0,
         gt=0,
         le=600,
     )
@@ -248,12 +215,29 @@ class Settings(BaseSettings):
     # general/informational message that should be routed straight to
     # route_to_general_chat, without spending a model round trip on
     # that decision (see catia_agent/intent_classifier.py). This uses
-    # a local Ollama embedding model, independent of model_provider,
-    # so a local Ollama install is required even when model_provider
-    # is azure_foundry.
+    # a local Ollama embedding model; Ollama is used for nothing else.
     # ------------------------------------------------------------------
 
     enable_embedding_intent_classifier: bool = True
+
+    ollama_base_url: str = (
+        "http://127.0.0.1:11434"
+    )
+
+    intent_classifier_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+    )
+
+    # After an embedding failure, skip the classifier (fall back to the
+    # model's own routing) for this long instead of paying the failure
+    # cost on every request.
+    intent_classifier_failure_cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0,
+        le=3600,
+    )
 
     intent_classifier_model: str = Field(
         default="qllama/bge-small-en-v1.5",
@@ -323,8 +307,10 @@ class Settings(BaseSettings):
         le=5_242_880,
     )
 
+    # How long a run may wait for the .NET executor to report a CATIA
+    # action result. Must comfortably exceed the slowest CATIA operation.
     pending_run_timeout_seconds: float = Field(
-        default=1800.0,
+        default=3600.0,
         gt=0,
         le=86_400,
     )
@@ -375,7 +361,6 @@ class Settings(BaseSettings):
         "app_name",
         "app_version",
         "api_host",
-        "ollama_model",
         mode="before",
     )
     @classmethod
@@ -495,32 +480,54 @@ class Settings(BaseSettings):
     def validate_model_provider_configuration(
         self,
     ) -> Settings:
-        if self.model_provider == "azure_foundry":
-            missing_fields = [
-                field_name
-                for field_name, field_value in (
-                    (
-                        "azure_foundry_endpoint",
-                        self.azure_foundry_endpoint,
-                    ),
-                    (
-                        "azure_foundry_api_key",
-                        self.azure_foundry_api_key,
-                    ),
-                    (
-                        "azure_foundry_deployment_name",
-                        self.azure_foundry_deployment_name,
-                    ),
-                )
-                if field_value is None
-            ]
+        missing_fields = [
+            field_name
+            for field_name, field_value in (
+                (
+                    "azure_foundry_endpoint",
+                    self.azure_foundry_endpoint,
+                ),
+                (
+                    "azure_foundry_api_key",
+                    self.azure_foundry_api_key,
+                ),
+                (
+                    "azure_foundry_deployment_name",
+                    self.azure_foundry_deployment_name,
+                ),
+            )
+            if field_value is None
+        ]
 
-            if missing_fields:
-                raise ValueError(
-                    "model_provider is 'azure_foundry' but the "
-                    "following settings are not configured: "
-                    + ", ".join(missing_fields)
-                )
+        if missing_fields:
+            raise ValueError(
+                "The following Azure AI Foundry settings are not "
+                "configured: " + ", ".join(missing_fields)
+            )
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_timeout_hierarchy(
+        self,
+    ) -> Settings:
+        # Worst case per request: classifier + MCP discovery + planner
+        # call + one duplicate-action retry. If the outer timeout could
+        # fire first, the client loses the actionId of a run that was
+        # already paused for execution.
+        worst_case_inner_seconds = (
+            self.intent_classifier_timeout_seconds
+            + self.mcp_request_timeout_seconds
+            + 2 * self.azure_foundry_request_timeout_seconds
+        )
+
+        if self.request_timeout_seconds <= worst_case_inner_seconds:
+            raise ValueError(
+                "request_timeout_seconds "
+                f"({self.request_timeout_seconds}) must exceed the "
+                "worst-case sum of inner timeouts "
+                f"({worst_case_inner_seconds})."
+            )
 
         return self
 
@@ -576,17 +583,7 @@ class Settings(BaseSettings):
 
     @property
     def active_model_name(self) -> str:
-        """
-        Name of the model served by the currently selected provider.
-
-        Diagnostic and logging code should read this instead of
-        branching on model_provider directly.
-        """
-
-        if self.model_provider == "azure_foundry":
-            return self.azure_foundry_deployment_name or "unconfigured"
-
-        return self.ollama_model
+        return self.azure_foundry_deployment_name or "unconfigured"
 
 
 @lru_cache(maxsize=1)

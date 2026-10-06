@@ -9,7 +9,6 @@ import catia_agent.readiness as readiness
 from catia_agent.readiness import (
     AzureFoundryReadinessCheck,
     McpReadinessCheck,
-    OllamaReadinessCheck,
     close_model_provider_readiness_check,
     get_readiness_report,
 )
@@ -20,82 +19,6 @@ def _reset_model_provider_readiness_cache():
     readiness._cached_model_provider_readiness_check = None
     yield
     readiness._cached_model_provider_readiness_check = None
-
-
-@pytest.mark.asyncio
-async def test_ollama_readiness_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    check = OllamaReadinessCheck(
-        base_url="http://127.0.0.1:11434",
-        model_name="qwen3:4b",
-        timeout_seconds=5,
-    )
-
-    fake_list_response = SimpleNamespace(
-        models=[
-            SimpleNamespace(model="qwen3:4b"),
-            SimpleNamespace(model="llama3:8b"),
-        ]
-    )
-
-    monkeypatch.setattr(
-        check._client,
-        "list",
-        AsyncMock(return_value=fake_list_response),
-    )
-
-    result = await check.check()
-
-    assert result["status"] == "available"
-    assert result["model"] == "qwen3:4b"
-
-
-@pytest.mark.asyncio
-async def test_ollama_readiness_model_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    check = OllamaReadinessCheck(
-        base_url="http://127.0.0.1:11434",
-        model_name="qwen3:4b",
-        timeout_seconds=5,
-    )
-
-    fake_list_response = SimpleNamespace(
-        models=[SimpleNamespace(model="llama3:8b")]
-    )
-
-    monkeypatch.setattr(
-        check._client,
-        "list",
-        AsyncMock(return_value=fake_list_response),
-    )
-
-    result = await check.check()
-
-    assert result["status"] == "unavailable"
-    assert "installedModels" in result
-
-
-@pytest.mark.asyncio
-async def test_ollama_readiness_unreachable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    check = OllamaReadinessCheck(
-        base_url="http://127.0.0.1:11434",
-        model_name="qwen3:4b",
-        timeout_seconds=5,
-    )
-
-    monkeypatch.setattr(
-        check._client,
-        "list",
-        AsyncMock(side_effect=RuntimeError("connection refused")),
-    )
-
-    result = await check.check()
-
-    assert result["status"] == "unavailable"
 
 
 @pytest.mark.asyncio
@@ -247,14 +170,7 @@ async def test_get_readiness_report_is_ready_only_when_both_available(
     assert report["status"] == "not_ready"
 
 
-def test_build_model_provider_readiness_check_is_cached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "catia_agent.config.settings.model_provider",
-        "ollama",
-    )
-
+def test_build_model_provider_readiness_check_is_cached() -> None:
     first = readiness._build_model_provider_readiness_check()
     second = readiness._build_model_provider_readiness_check()
 
@@ -265,11 +181,6 @@ def test_build_model_provider_readiness_check_is_cached(
 async def test_close_model_provider_readiness_check_closes_and_clears_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "catia_agent.config.settings.model_provider",
-        "ollama",
-    )
-
     check = readiness._build_model_provider_readiness_check()
 
     aclose_mock = AsyncMock()

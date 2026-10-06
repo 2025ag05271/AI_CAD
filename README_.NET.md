@@ -15,13 +15,11 @@ The .NET layer is the final authority for CATIA execution. Neither the
 tool-calling model, LangGraph, FastAPI, nor the MCP server directly invokes
 CATIA COM.
 
-The Python backend selects its tool-calling model provider via
-`CATIA_AGENT_MODEL_PROVIDER`: a local Ollama model for development, or
-Qwen 3.6 27B hosted on Azure AI Foundry for production. The planner sits
-behind a provider-neutral abstraction, so switching providers requires no
-.NET change. The `status`, `errorCode`, and payload contracts documented
-here do not depend on which model is in use. See the Python guide for
-details.
+The Python backend uses Qwen 3.6 27B hosted on Azure AI Foundry as its
+tool-calling model, behind a provider-neutral abstraction, so a future
+provider change requires no .NET change. The `status`, `errorCode`, and
+payload contracts documented here do not depend on which model is in
+use. See the Python guide for details.
 
 ## 2. High-level architecture
 
@@ -268,7 +266,7 @@ that same STA thread.
   "CatiaAgent": {
     "BaseAddress": "http://127.0.0.1:8000",
     "ApiPrefix": "/api/v1",
-    "RequestTimeout": "00:01:00",
+    "RequestTimeout": "00:02:30",
     "MaximumActionsPerRun": 20
   },
   "CatiaAgentTools": {
@@ -571,7 +569,18 @@ The client should:
 
 - Set BaseAddress from `CatiaAgentOptions`.
 - Prefix every Agent and Tools path with `CatiaAgentOptions.ApiPrefix`.
-- Apply RequestTimeout.
+- Apply RequestTimeout per HTTP call (default `00:02:30`). It must be
+  longer than the backend's `CATIA_AGENT_REQUEST_TIMEOUT_SECONDS` (120s)
+  so the backend's own timeout fires first and returns a precise
+  `REQUEST_TIMED_OUT` / `MODEL_REQUEST_TIMED_OUT` instead of a client-side
+  `TaskCanceledException`.
+- Do not apply RequestTimeout (or any single `CancellationTokenSource`
+  with a timeout) across the whole `HandleAsync` loop. CATIA execution
+  happens between the two HTTP calls and can take 5+ minutes; it is
+  bounded only by the backend's `CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS`
+  (default 1 hour), after which a late result is rejected with 404
+  `AGENT_RUN_NOT_FOUND`. If CATIA operations can exceed an hour, raise
+  that backend setting.
 - Send `X-Request-ID` (Python echoes it if it matches
   `^[A-Za-z0-9._:-]+$`, otherwise replaces it silently).
 - Use `System.Net.Http.Json` and `System.Text.Json`.
@@ -909,15 +918,14 @@ Codes surfaced from the FastAPI backend and preserved by
 | 400  | `INVALID_CONTENT_LENGTH`         | Malformed`Content-Length` header on the request.                                                                      |
 | 401  | `ADMIN_API_KEY_REQUIRED`         | An admin endpoint was called without`X-Admin-API-Key`.                                                                |
 | 403  | `ADMIN_API_KEY_INVALID`          | The supplied admin key did not match.                                                                                   |
-| 404  | `AGENT_RUN_NOT_FOUND`            | No pending run matches the supplied`runId`.                                                                           |
-| 409  | `AGENT_RUN_STATE_CONFLICT`       | Run/session state is incompatible with the request (start-while-pending, mismatched runId or actionId, run not paused). |
+| 404  | `AGENT_RUN_NOT_FOUND`            | No pending run matches the supplied`runId`, or it expired after waiting longer than `CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS`. |
+| 409  | `AGENT_RUN_STATE_CONFLICT`       | Run/session state is incompatible with the request (start-while-pending, another request for the same session still in progress, mismatched runId or actionId, run not paused). |
 | 413  | `REQUEST_BODY_TOO_LARGE`         | Request body exceeded the configured size limit.                                                                        |
 | 422  | `REQUEST_VALIDATION_FAILED`      | The request payload failed FastAPI/Pydantic validation.                                                                 |
 | 422  | `MODEL_SCHEMA_VALIDATION_FAILED` | An internal Pydantic model rejected a tool call or action result.                                                       |
 | 500  | `INTERNAL_SERVER_ERROR`          | Unhandled exception. Logged with a stack trace, not exposed to the client.                                              |
 | 503  | `MCP_REQUEST_FAILED`             | The CATIA MCP tool service is unreachable or returned an invalid catalog.                                               |
 | 503  | `MODEL_PROVIDER_FAILED`          | The configured tool-calling model provider failed (non-timeout).                                                        |
-| 503  | `OLLAMA_REQUEST_FAILED`          | The local Ollama service returned an error while the current provider was in use.                                       |
 | 504  | `MODEL_REQUEST_TIMED_OUT`        | The model did not respond within the configured timeout.                                                                |
 | 504  | `REQUEST_TIMED_OUT`              | FastAPI's whole-request timeout elapsed before the handler completed.                                                   |
 
@@ -936,6 +944,7 @@ ACTION_RESULT_VALIDATION_FAILED  → now REQUEST_VALIDATION_FAILED
 TOOL_SCHEMA_VALIDATION_FAILED    → now MODEL_SCHEMA_VALIDATION_FAILED
 MCP_TOOL_DISCOVERY_FAILED        → now MCP_REQUEST_FAILED
 OLLAMA_CONNECTION_FAILED         → now MODEL_PROVIDER_FAILED or MODEL_REQUEST_TIMED_OUT
+OLLAMA_REQUEST_FAILED            → removed; the backend no longer uses Ollama for the model
 ```
 
 Do not return raw COM objects or exception instances to FastAPI.
@@ -1431,8 +1440,10 @@ before these ship.
 Before validating an Agent command, confirm:
 
 ```text
-[ ] The configured model provider is available
-    (Ollama for local dev, or Azure AI Foundry Qwen 3.6 27B in production)
+[ ] The Azure AI Foundry model endpoint (Qwen 3.6 27B) is reachable
+[ ] CatiaAgent:RequestTimeout is greater than the backend's
+    CATIA_AGENT_REQUEST_TIMEOUT_SECONDS and is applied per HTTP call,
+    not across CATIA execution
 [ ] MCP server is running on 127.0.0.1:8001
 [ ] FastAPI is running on 127.0.0.1:8000
 [ ] GET /ready returns 200
