@@ -11,7 +11,7 @@ truststore.inject_into_ssl()
 
 import asyncio
 import hmac
-import time
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Sequence
 
@@ -39,8 +39,11 @@ from catia_agent.graph import (
     start_catia_agent,
 )
 from catia_agent.logging_config import (
+    Stopwatch,
     bind_logging_context,
     get_logger,
+    log_duration,
+    log_event,
     normalize_request_id,
     setup_logging,
 )
@@ -476,7 +479,7 @@ async def request_context_middleware(
 
     request.state.request_id = request_id
 
-    started_at = time.perf_counter()
+    stopwatch = Stopwatch()
     response_status = 500
 
     content_length_header = (
@@ -606,24 +609,28 @@ async def request_context_middleware(
             )
 
         finally:
-            duration_ms = round(
-                (
-                    time.perf_counter()
-                    - started_at
-                )
-                * 1000,
-                2,
+            duration_ms = stopwatch.elapsed_ms
+
+            log_event(
+                logger,
+                "http_request_completed",
+                method=request.method,
+                path=request.url.path,
+                statusCode=response_status,
+                durationMs=duration_ms,
             )
 
-            logger.info(
-                "http_request_completed",
-                extra={
-                    "method": request.method,
-                    "path": request.url.path,
-                    "statusCode": response_status,
-                    "durationMs": duration_ms,
-                },
-            )
+            if duration_ms > settings.slow_request_threshold_ms:
+                log_event(
+                    logger,
+                    "http_request_slow",
+                    level=logging.WARNING,
+                    method=request.method,
+                    path=request.url.path,
+                    statusCode=response_status,
+                    durationMs=duration_ms,
+                    thresholdMs=settings.slow_request_threshold_ms,
+                )
 
         response.headers[
             REQUEST_ID_HEADER
@@ -748,12 +755,24 @@ async def create_agent_run(
 ) -> AgentRunResponse:
     with bind_logging_context(
         session_id=request.sessionId
-    ):
+    ), log_duration(
+        logger,
+        "agent_run_start",
+        messageLength=len(request.message),
+        catiaRunning=(
+            request.catiaContext.isRunning
+            if request.catiaContext is not None
+            else None
+        ),
+    ) as timing:
         response = await start_catia_agent(
             session_id=request.sessionId,
             user_message=request.message,
             catia_context=request.catiaContext,
         )
+
+        timing["status"] = response.get("status")
+        timing["runId"] = response.get("runId")
 
         logger.info(
             "agent_run_planned",
@@ -799,13 +818,17 @@ async def submit_action_result(
         session_id=session_id,
         run_id=run_id,
         action_id=request.actionId,
-    ):
-        logger.info(
+    ), log_duration(
+        logger,
+        "agent_run_resume",
+        success=request.success,
+        errorCode=request.errorCode,
+    ) as timing:
+        log_event(
+            logger,
             "action_result_received",
-            extra={
-                "success": request.success,
-                "errorCode": request.errorCode,
-            },
+            success=request.success,
+            errorCode=request.errorCode,
         )
 
         response = await resume_catia_agent(
@@ -813,17 +836,8 @@ async def submit_action_result(
             action_result=request,
         )
 
-        logger.info(
-            "agent_run_resumed",
-            extra={
-                "status": response.get(
-                    "status"
-                ),
-                "nextActionId": response.get(
-                    "actionId"
-                ),
-            },
-        )
+        timing["status"] = response.get("status")
+        timing["nextActionId"] = response.get("actionId")
 
         return response  # type: ignore[return-value]
 

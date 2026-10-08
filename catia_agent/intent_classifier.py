@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from typing import Any
@@ -9,7 +10,7 @@ import numpy as np
 from langchain_ollama import OllamaEmbeddings
 
 from catia_agent.config import settings
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import Stopwatch, get_logger, log_event
 
 
 logger = get_logger(__name__)
@@ -255,6 +256,7 @@ async def _get_intent_matrices() -> dict[str, np.ndarray]:
             return _intent_matrices
 
         matrices: dict[str, np.ndarray] = {}
+        stopwatch = Stopwatch()
 
         for intent, phrases in EXEMPLAR_INTENTS.items():
             normalized_phrases = [
@@ -264,6 +266,16 @@ async def _get_intent_matrices() -> dict[str, np.ndarray]:
                 normalized_phrases
             )
             matrices[intent] = _normalize(np.asarray(vectors))
+
+        log_event(
+            logger,
+            "intent_exemplars_embedded",
+            durationMs=stopwatch.elapsed_ms,
+            exemplarCount=sum(
+                len(phrases)
+                for phrases in EXEMPLAR_INTENTS.values()
+            ),
+        )
 
         _intent_matrices = matrices
         return matrices
@@ -283,7 +295,14 @@ async def classify_request_intent(
     global _classifier_unavailable_until
 
     if time.monotonic() < _classifier_unavailable_until:
+        log_event(
+            logger,
+            "intent_classifier_skipped_cooldown",
+            level=logging.DEBUG,
+        )
         return None
+
+    stopwatch = Stopwatch()
 
     try:
         async with asyncio.timeout(
@@ -308,6 +327,7 @@ async def classify_request_intent(
             "intent_classifier_embedding_failed",
             extra={
                 "exceptionType": type(exc).__name__,
+                "durationMs": stopwatch.elapsed_ms,
                 "cooldownSeconds": (
                     settings
                     .intent_classifier_failure_cooldown_seconds
@@ -352,6 +372,8 @@ async def is_agentic_request(
     if not settings.enable_embedding_intent_classifier:
         return None
 
+    stopwatch = Stopwatch()
+
     classification = await classify_request_intent(
         user_message
     )
@@ -365,6 +387,7 @@ async def is_agentic_request(
         "intent_classified",
         extra={
             "intent": intent,
+            "durationMs": stopwatch.elapsed_ms,
             "agenticScore": round(
                 scores[AGENTIC_INTENT], 4
             ),

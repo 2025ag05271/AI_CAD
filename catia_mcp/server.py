@@ -4,10 +4,18 @@ from pathlib import PureWindowsPath
 from typing import Any, Literal
 
 from fastmcp import FastMCP
+from catia_agent.logging_config import (
+    get_logger,
+    log_event,
+    setup_logging,
+)
 from catia_agent.utils import (
     validate_download_cad_inputs,
     validate_start_model_inputs,
 )
+
+
+logger = get_logger(__name__)
 
 
 # -------------------------------------------------------------------------
@@ -130,6 +138,13 @@ def create_executor_action(
     The result describes a proposed external operation. It does not
     indicate that CATIA execution has occurred.
     """
+
+    log_event(
+        logger,
+        "mcp_action_prepared",
+        action=action,
+        argumentNames=sorted(arguments),
+    )
 
     return {
         "status": "action_prepared",
@@ -486,6 +501,15 @@ def run_server() -> None:
     """
     Run the local CATIA MCP HTTP server.
     """
+
+    setup_logging(log_file_prefix="CatiaAgentMcp")
+
+    log_event(
+        logger,
+        "mcp_server_starting",
+        host="127.0.0.1",
+        port=8001,
+    )
 
     mcp.run(
         transport="http",

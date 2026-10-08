@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import PureWindowsPath
 from typing import Any
 
 from pydantic import ValidationError
 
 from catia_agent.config import settings
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import Stopwatch, get_logger
 from catia_agent.mcp_tools import (
     load_ollama_tools_from_mcp,
 )
@@ -942,21 +941,14 @@ async def plan_catia_action(
         },
     )
 
-    started_at = time.perf_counter()
+    model_stopwatch = Stopwatch()
 
     response = await model_client.select_tool(
         messages=messages,
         tools=available_tools,
     )
 
-    duration_ms = round(
-        (
-            time.perf_counter()
-            - started_at
-        )
-        * 1000,
-        2,
-    )
+    duration_ms = model_stopwatch.elapsed_ms
 
     tool_calls = _extract_tool_calls(response)
 

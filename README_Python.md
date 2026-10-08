@@ -1379,6 +1379,49 @@ Examples of deterministic Python validation:
 
 The application emits structured JSON logs when
 `CATIA_AGENT_ENABLE_JSON_LOGS=true` (see `catia_agent/logging_config.py`).
+
+Every log line goes to the console and, when
+`CATIA_AGENT_ENABLE_FILE_LOGGING=true` (default), to a daily file in
+`CATIA_AGENT_LOG_DIRECTORY` (default `C:\Temp\AI_Logs`, created if
+missing): `CatiaAgentApi_YYYYMMDD.log` for FastAPI and
+`CatiaAgentMcp_YYYYMMDD.log` for the MCP server. Files older than
+`CATIA_AGENT_LOG_FILE_RETENTION_DAYS` are deleted. Uvicorn's own logs are
+routed into the same file. Tests disable file logging (`tests/conftest.py`).
+
+New logging code should use the shared helpers in
+`catia_agent/logging_config.py` so the log shape can be changed in one
+place:
+
+```python
+from catia_agent.logging_config import get_logger, log_event, log_duration, Stopwatch
+
+logger = get_logger(__name__)
+
+log_event(logger, "something_happened", tool="open_cad_document")
+
+with log_duration(logger, "agent_run_start", sessionId=sid) as result:
+    response = await start(...)
+    result["status"] = response["status"]
+# -> agent_run_start_completed {durationMs, status, ...}
+#    or agent_run_start_failed {durationMs, exceptionType, ...}
+
+stopwatch = Stopwatch(); ...; stopwatch.elapsed_ms
+```
+
+Timings logged today (`durationMs` unless noted):
+
+| Event | Measures |
+| --- | --- |
+| `http_request_completed` (+ `http_request_slow` above `CATIA_AGENT_SLOW_REQUEST_THRESHOLD_MS`) | Whole HTTP request |
+| `agent_run_start_completed` / `_failed` | `POST /agent/runs` end to end |
+| `agent_run_resume_completed` / `_failed` | `POST .../action-results` end to end |
+| `plan_action_node_completed` | One planning step, incl. duplicate retry |
+| `model_tool_selected` | Azure model round trip as seen by the planner |
+| `azure_foundry_usage` | Raw Azure HTTP call, with token counts |
+| `intent_classified`, `intent_exemplars_embedded` | Embedding classifier |
+| `mcp_tool_discovery_completed` | MCP catalog fetch |
+| `catia_action_execution_measured` (`catiaExecutionMs`) | Time from handing an action to .NET until its result arrived, i.e. CATIA execution time |
+
 Every log record automatically carries any of the following that are
 bound in the current async context:
 

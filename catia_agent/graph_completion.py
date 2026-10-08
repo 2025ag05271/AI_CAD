@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from catia_agent.config import settings
@@ -18,7 +19,7 @@ from catia_agent.graph_state import (
     CatiaAgentState,
     TERMINAL_READ_ONLY_TOOLS,
 )
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import get_logger, log_event
 from catia_agent.models import ActionExecutionResultRequest
 
 
@@ -81,6 +82,23 @@ def record_action_result_node(
             "The submitted actionId does not match "
             "the action currently awaiting a result."
         )
+
+    # Time between handing the action to .NET and receiving its result,
+    # i.e. how long CATIA itself took (plus client overhead).
+    requested_at = state.get("action_requested_at")
+
+    log_event(
+        logger,
+        "catia_action_execution_measured",
+        action=pending_action.action,
+        success=result.success,
+        errorCode=result.errorCode,
+        catiaExecutionMs=(
+            round((time.time() - requested_at) * 1000, 2)
+            if requested_at is not None
+            else None
+        ),
+    )
 
     completed_actions = list(
         state.get("completed_actions", [])

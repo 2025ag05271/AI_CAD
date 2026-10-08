@@ -4,13 +4,14 @@ import json
 import logging
 import logging.config
 import re
-from collections.abc import Generator
-
 import sys
+import time
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from datetime import datetime, timezone
-from typing import Any, Iterator
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import IO, Any, Iterator
 from uuid import uuid4
 
 from catia_agent.config import settings
@@ -82,6 +83,8 @@ _RESERVED_LOG_ATTRIBUTES = frozenset(
         "thread",
         "threadName",
         "taskName",
+        # uvicorn duplicate of the message with ANSI color codes
+        "color_message",
     }
 )
 
@@ -465,9 +468,140 @@ class DevelopmentFormatter(logging.Formatter):
 # Logging setup
 # -------------------------------------------------------------------------
 
-def setup_logging() -> None:
+class DailyFileHandler(logging.Handler):
     """
-    Configure application and dependency logging.
+    Append to <directory>/<prefix>_YYYYMMDD.log, switching to a new file
+    at local midnight. Files are never renamed, so several processes can
+    safely write to the same directory.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        prefix: str,
+        retention_days: int,
+    ) -> None:
+        super().__init__()
+        self.directory = directory
+        self.prefix = prefix
+        self.retention_days = retention_days
+        self._current_date: date | None = None
+        self._stream: IO[str] | None = None
+
+    def path_for(self, day: date) -> Path:
+        return self.directory / f"{self.prefix}_{day:%Y%m%d}.log"
+
+    def _open_for(self, day: date) -> None:
+        if self._stream is not None:
+            self._stream.close()
+
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._stream = open(
+            self.path_for(day),
+            "a",
+            encoding="utf-8",
+        )
+        self._current_date = day
+        self._delete_expired_files(day)
+
+    def _delete_expired_files(self, today: date) -> None:
+        cutoff = today - timedelta(days=self.retention_days)
+
+        for path in self.directory.glob(f"{self.prefix}_*.log"):
+            try:
+                file_day = datetime.strptime(
+                    path.stem.rsplit("_", 1)[-1],
+                    "%Y%m%d",
+                ).date()
+            except ValueError:
+                continue
+
+            if file_day < cutoff:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            today = date.today()
+
+            if today != self._current_date or self._stream is None:
+                self._open_for(today)
+
+            assert self._stream is not None
+            self._stream.write(self.format(record) + "\n")
+            self._stream.flush()
+
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        self.acquire()
+        try:
+            if self._stream is not None:
+                self._stream.close()
+                self._stream = None
+        finally:
+            self.release()
+
+        super().close()
+
+
+_OWNED_HANDLER_ATTRIBUTE = "_catia_agent_handler"
+
+
+class _WindowsConnectionResetFilter(logging.Filter):
+    """
+    Drop asyncio's "Exception in callback _ProactorBasePipeTransport.
+    _call_connection_lost" ConnectionResetError (WinError 10054). It is
+    logged on Windows whenever a client closes a socket first and is
+    harmless.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info is None:
+            return True
+
+        exception = record.exc_info[1]
+
+        return not (
+            isinstance(exception, ConnectionResetError)
+            and "_call_connection_lost" in record.getMessage()
+        )
+
+
+def _build_file_handler(
+    log_file_prefix: str,
+    formatter: logging.Formatter,
+) -> DailyFileHandler | None:
+    directory = Path(settings.log_directory)
+
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(
+            f"File logging disabled: cannot create {directory}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    handler = DailyFileHandler(
+        directory=directory,
+        prefix=log_file_prefix,
+        retention_days=settings.log_file_retention_days,
+    )
+    handler.setLevel(settings.log_level)
+    handler.setFormatter(formatter)
+    return handler
+
+
+def setup_logging(
+    log_file_prefix: str = "CatiaAgentApi",
+) -> None:
+    """
+    Configure application and dependency logging: console always, plus
+    a daily file in settings.log_directory when file logging is enabled.
 
     This function is safe to call more than once.
     """
@@ -479,22 +613,55 @@ def setup_logging() -> None:
     else:
         formatter = DevelopmentFormatter()
 
-    handler = logging.StreamHandler(
+    console_handler = logging.StreamHandler(
         sys.stdout
     )
-    handler.setLevel(settings.log_level)
-    handler.setFormatter(formatter)
+    console_handler.setLevel(settings.log_level)
+    console_handler.setFormatter(formatter)
+
+    handlers: list[logging.Handler] = [console_handler]
+    log_file_path: str | None = None
+
+    if settings.enable_file_logging:
+        file_handler = _build_file_handler(
+            log_file_prefix,
+            formatter,
+        )
+
+        if file_handler is not None:
+            handlers.append(file_handler)
+            log_file_path = str(
+                file_handler.path_for(date.today())
+            )
 
     root_logger = logging.getLogger()
     root_logger.setLevel(settings.log_level)
+
+    for existing_handler in root_logger.handlers:
+        if getattr(existing_handler, _OWNED_HANDLER_ATTRIBUTE, False):
+            existing_handler.close()
+
     root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+
+    for handler in handlers:
+        setattr(handler, _OWNED_HANDLER_ATTRIBUTE, True)
+        root_logger.addHandler(handler)
+
+    # Route uvicorn's own startup/error logs through the same handlers
+    # (and therefore into the log file).
+    for uvicorn_logger_name in ("uvicorn", "uvicorn.error"):
+        uvicorn_logger = logging.getLogger(uvicorn_logger_name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True
 
     dependency_log_levels = {
         "httpx": logging.WARNING,
         "httpcore": logging.WARNING,
         "asyncio": logging.WARNING,
         "multipart": logging.WARNING,
+        # These dump full MCP payloads (every tool schema) at DEBUG.
+        "mcp": logging.INFO,
+        "sse_starlette": logging.INFO,
     }
 
     for (
@@ -506,7 +673,22 @@ def setup_logging() -> None:
         )
         dependency_logger.setLevel(log_level)
 
+    asyncio_logger = logging.getLogger("asyncio")
+
+    if not any(
+        isinstance(existing_filter, _WindowsConnectionResetFilter)
+        for existing_filter in asyncio_logger.filters
+    ):
+        asyncio_logger.addFilter(_WindowsConnectionResetFilter())
+
     logging.captureWarnings(True)
+
+    log_event(
+        get_logger(__name__),
+        "logging_configured",
+        logLevel=settings.log_level,
+        logFile=log_file_path,
+    )
 
 
 def get_logger(
@@ -517,3 +699,112 @@ def get_logger(
     """
 
     return logging.getLogger(name)
+
+
+# -------------------------------------------------------------------------
+# Generic logging and timing helpers
+#
+# Use these from any module so log shape can be changed in one place.
+# -------------------------------------------------------------------------
+
+def log_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    level: int = logging.INFO,
+    exc_info: bool = False,
+    **fields: Any,
+) -> None:
+    """
+    Emit one structured log event with arbitrary fields.
+
+    Example: log_event(logger, "mcp_tool_called", tool="open_cad_document")
+    """
+
+    # Field names that clash with LogRecord attributes would raise.
+    safe_fields = {
+        (
+            f"field_{key}"
+            if key in _RESERVED_LOG_ATTRIBUTES
+            else key
+        ): value
+        for key, value in fields.items()
+    }
+
+    logger.log(
+        level,
+        event,
+        extra=safe_fields,
+        exc_info=exc_info,
+        stacklevel=2,
+    )
+
+
+class Stopwatch:
+    """
+    Monotonic timer: sw = Stopwatch(); ...; sw.elapsed_ms
+    """
+
+    def __init__(self) -> None:
+        self._started_at = time.perf_counter()
+
+    @property
+    def elapsed_ms(self) -> float:
+        return round(
+            (time.perf_counter() - self._started_at) * 1000,
+            2,
+        )
+
+
+@contextmanager
+def log_duration(
+    logger: logging.Logger,
+    event: str,
+    *,
+    level: int = logging.INFO,
+    **fields: Any,
+) -> Iterator[dict[str, Any]]:
+    """
+    Time a block and log "<event>_completed" or "<event>_failed" with
+    durationMs. Works inside async functions too.
+
+    The yielded dict can be filled with result fields to include:
+
+        with log_duration(logger, "agent_run_start") as result:
+            response = await start(...)
+            result["status"] = response["status"]
+    """
+
+    stopwatch = Stopwatch()
+    result_fields: dict[str, Any] = {}
+
+    log_event(
+        logger,
+        f"{event}_started",
+        level=logging.DEBUG,
+        **fields,
+    )
+
+    try:
+        yield result_fields
+
+    except BaseException as exc:
+        log_event(
+            logger,
+            f"{event}_failed",
+            level=logging.WARNING,
+            durationMs=stopwatch.elapsed_ms,
+            exceptionType=type(exc).__name__,
+            **fields,
+            **result_fields,
+        )
+        raise
+
+    log_event(
+        logger,
+        f"{event}_completed",
+        level=level,
+        durationMs=stopwatch.elapsed_ms,
+        **fields,
+        **result_fields,
+    )

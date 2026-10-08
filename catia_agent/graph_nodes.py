@@ -12,7 +12,7 @@ from catia_agent.graph_state import (
     AgentRunStateConflictError,
     CatiaAgentState,
 )
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import get_logger, log_duration
 from catia_agent.models import (
     ActionExecutionResultRequest,
     ActionRequiredResult,
@@ -32,6 +32,23 @@ logger = get_logger(__name__)
 # -------------------------------------------------------------------------
 
 async def plan_action_node(
+    state: CatiaAgentState,
+) -> dict[str, Any]:
+    with log_duration(
+        logger,
+        "plan_action_node",
+        completedActionCount=len(
+            state.get("completed_actions", [])
+        ),
+    ) as timing:
+        update = await _plan_action(state)
+        timing["plannerResult"] = type(
+            update["planner_result"]
+        ).__name__
+        return update
+
+
+async def _plan_action(
     state: CatiaAgentState,
 ) -> dict[str, Any]:
     completed_actions = list(

@@ -9,7 +9,7 @@ from typing import Any
 from fastmcp import Client
 
 from catia_agent.config import settings
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import Stopwatch, get_logger
 
 
 logger = get_logger(__name__)
@@ -272,7 +272,7 @@ class McpToolCatalogService:
 
         client = Client(self._server_url)
 
-        started_at = time.perf_counter()
+        stopwatch = Stopwatch()
 
         try:
             async with asyncio.timeout(
@@ -310,14 +310,7 @@ class McpToolCatalogService:
                 f"{self._server_url}."
             ) from exc
 
-        duration_ms = round(
-            (
-                time.perf_counter()
-                - started_at
-            )
-            * 1000,
-            2,
-        )
+        duration_ms = stopwatch.elapsed_ms
 
         if not tools:
             logger.error(

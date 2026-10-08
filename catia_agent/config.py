@@ -325,6 +325,28 @@ class Settings(BaseSettings):
 
     include_technical_details_in_errors: bool = False
 
+    # Logs are written to the console and, when enabled, to daily files
+    # <log_directory>/<prefix>_YYYYMMDD.log (created if missing).
+    enable_file_logging: bool = True
+
+    log_directory: str = Field(
+        default=r"C:\Temp\AI_Logs",
+        min_length=1,
+        max_length=260,
+    )
+
+    log_file_retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+    )
+
+    # Requests slower than this are logged at WARNING as well.
+    slow_request_threshold_ms: float = Field(
+        default=30_000,
+        gt=0,
+    )
+
     # ------------------------------------------------------------------
     # Operational and diagnostic endpoints
     # ------------------------------------------------------------------

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 import httpx
 
 from catia_agent.config import Settings, settings
-from catia_agent.logging_config import get_logger
+from catia_agent.logging_config import Stopwatch, get_logger, log_event
 
 
 logger = get_logger(__name__)
@@ -154,6 +155,8 @@ class AzureFoundryToolCallingModelClient:
             extra={"payload": payload},
         )
 
+        stopwatch = Stopwatch()
+
         try:
             response = await self._client.post(
                 self._chat_completions_url,
@@ -161,22 +164,39 @@ class AzureFoundryToolCallingModelClient:
             )
 
         except httpx.TimeoutException as exc:
+            log_event(
+                logger,
+                "azure_foundry_request_timed_out",
+                level=logging.WARNING,
+                durationMs=stopwatch.elapsed_ms,
+                timeoutSeconds=self._timeout_seconds,
+            )
             raise ModelProviderTimeoutError(
                 "The Azure AI Foundry model did not respond "
                 f"within {self._timeout_seconds} seconds."
             ) from exc
 
         except httpx.HTTPError as exc:
+            log_event(
+                logger,
+                "azure_foundry_connection_failed",
+                level=logging.WARNING,
+                durationMs=stopwatch.elapsed_ms,
+                exceptionType=type(exc).__name__,
+            )
             raise AzureFoundryRequestError(
                 "Could not reach the Azure AI Foundry model "
                 "endpoint."
             ) from exc
+
+        duration_ms = stopwatch.elapsed_ms
 
         if response.status_code >= 400:
             logger.error(
                 "azure_foundry_request_failed",
                 extra={
                     "statusCode": response.status_code,
+                    "durationMs": duration_ms,
                     "responseBody": response.text[:2000],
                 },
             )
@@ -212,6 +232,7 @@ class AzureFoundryToolCallingModelClient:
         logger.info(
             "azure_foundry_usage",
             extra={
+                "durationMs": duration_ms,
                 "promptTokens": usage.get(
                     "prompt_tokens"
                 ),
