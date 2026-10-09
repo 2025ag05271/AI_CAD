@@ -47,6 +47,7 @@ APPROVED_CATIA_TOOL_NAMES = frozenset(
         "create_cad_document",
         "download_cad",
         "start_model",
+        "open_master_drawing",
     }
 )
 

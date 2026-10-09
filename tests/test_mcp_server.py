@@ -22,7 +22,42 @@ async def test_mcp_server_exposes_all_expected_tools() -> None:
         "close_cad_document",
         "download_cad",
         "start_model",
+        "open_master_drawing",
     }
+
+
+# ---------------------------------------------------------
+# open_master_drawing
+# ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_prepares_action_with_optional_revision() -> None:
+    async with Client(mcp) as client:
+        number_only = await client.call_tool(
+            "open_master_drawing",
+            {"partNumber": " 674089800a "},
+        )
+        with_revision = await client.call_tool(
+            "open_master_drawing",
+            {"partNumber": "674089800A", "partRevision": "01"},
+        )
+
+    assert number_only.data["action"] == "open_master_drawing"
+    assert number_only.data["arguments"] == {
+        "partNumber": "674089800A",
+        "partRevision": None,
+    }
+    assert with_revision.data["arguments"]["partRevision"] == "01"
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_rejects_revision_without_part_number() -> None:
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError, match="requires partNumber"):
+            await client.call_tool(
+                "open_master_drawing",
+                {"partRevision": "01"},
+            )
 
 
 # ---------------------------------------------------------

@@ -909,3 +909,146 @@ async def test_plan_catia_action_logs_tool_names_on_multiple_decisions(
         "open_cad_document",
     ]
 
+
+# ---------------------------------------------------------
+# open_master_drawing
+# ---------------------------------------------------------
+
+def _mock_master_drawing_call(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict,
+) -> None:
+    async def fake_load_tools(force_refresh: bool = False):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "open_master_drawing",
+                    "description": "Open a master drawing.",
+                    "parameters": {},
+                },
+            }
+        ]
+
+    monkeypatch.setattr(
+        "catia_agent.planner.load_ollama_tools_from_mcp",
+        fake_load_tools,
+    )
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        AsyncMock(
+            return_value={
+                "message": {
+                    "tool_calls": [
+                        _tool_call("open_master_drawing", arguments)
+                    ]
+                }
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_command", "arguments", "expected_revision"),
+    [
+        (
+            "Open the master drawing for 674089800A",
+            {"partNumber": "674089800A"},
+            None,
+        ),
+        (
+            "open master drawing of part 674089800a revision 01",
+            {"partNumber": "674089800a", "partRevision": "01"},
+            "01",
+        ),
+    ],
+)
+async def test_open_master_drawing_action_required(
+    monkeypatch: pytest.MonkeyPatch,
+    user_command: str,
+    arguments: dict,
+    expected_revision: str | None,
+) -> None:
+    _mock_master_drawing_call(monkeypatch, arguments)
+
+    result = await plan_catia_action(user_command=user_command)
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.action == "open_master_drawing"
+    assert result.action.arguments.partNumber == "674089800A"
+    assert result.action.arguments.partRevision == expected_revision
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_with_only_revision_asks_for_part_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(monkeypatch, {"partRevision": "01"})
+
+    result = await plan_catia_action(
+        user_command="Open the master drawing revision 01",
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "partNumber"
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_invented_part_number_asks_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(
+        monkeypatch,
+        {"partNumber": "123456789Z", "partRevision": "01"},
+    )
+
+    result = await plan_catia_action(
+        user_command="Open the master drawing revision 01",
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "partNumber"
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_part_number_from_earlier_turn_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(
+        monkeypatch,
+        {"partNumber": "674089800A", "partRevision": "01"},
+    )
+
+    result = await plan_catia_action(
+        user_command="Revision 01",
+        conversation_history=[
+            {"role": "user", "content": "Open the master drawing"},
+            {
+                "role": "assistant",
+                "content": "Which part number? 674089800A?",
+            },
+            {"role": "user", "content": "It is 674089800A"},
+        ],
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.arguments.partRevision == "01"
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_drops_invented_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(
+        monkeypatch,
+        {"partNumber": "674089800A", "partRevision": "07"},
+    )
+
+    result = await plan_catia_action(
+        user_command="Open the master drawing for 674089800A",
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.arguments.partRevision is None
+

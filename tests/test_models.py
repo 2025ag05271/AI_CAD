@@ -12,6 +12,7 @@ from catia_agent.models import (
     GetActiveDocumentAction,
     NonAgenticResult,
     OpenCadDocumentAction,
+    OpenMasterDrawingAction,
     RequestClarificationAction,
     RouteToGeneralChatAction,
     StartModelAction,
@@ -27,6 +28,38 @@ def test_open_cad_document_action_requires_file_path() -> None:
                 "arguments": {},
             }
         )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"partRevision": "01"},
+        {"partNumber": "   "},
+        {"partNumber": "67408 9800A"},
+        {"partNumber": "674089800A", "partRevision": "0 1"},
+        {"partNumber": "A" * 51},
+    ],
+)
+def test_open_master_drawing_rejects_invalid_arguments(
+    arguments: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        OpenMasterDrawingAction.model_validate(
+            {"action": "open_master_drawing", "arguments": arguments}
+        )
+
+
+def test_open_master_drawing_normalizes_arguments() -> None:
+    action = OpenMasterDrawingAction.model_validate(
+        {
+            "action": "open_master_drawing",
+            "arguments": {"partNumber": " x670830400c ", "partRevision": "00-02"},
+        }
+    )
+
+    assert action.arguments.partNumber == "X670830400C"
+    assert action.arguments.partRevision == "00-02"
 
 
 def test_get_active_document_action_ignores_extra_arguments() -> None:

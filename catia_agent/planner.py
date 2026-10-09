@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import PureWindowsPath
 from typing import Any
 
 from pydantic import ValidationError
 
 from catia_agent.config import settings
-from catia_agent.logging_config import Stopwatch, get_logger
+from catia_agent.logging_config import Stopwatch, get_logger, log_event
 from catia_agent.mcp_guardrails import APPROVED_CATIA_TOOL_NAMES
 from catia_agent.mcp_tools import (
     load_ollama_tools_from_mcp,
@@ -32,6 +33,7 @@ from catia_agent.models import (
     InvalidRequestResult,
     NonAgenticResult,
     OpenCadDocumentAction,
+    OpenMasterDrawingAction,
     PlannerResult,
     PlanningErrorResult,
     ReportUnsupportedCatiaAction,
@@ -442,6 +444,7 @@ def create_typed_action(
     | CreateCadDocumentAction
     | DownloadCadAction
     | StartModelAction
+    | OpenMasterDrawingAction
     | RequestClarificationAction
     | RouteToGeneralChatAction
     | ReportUnsupportedCatiaAction
@@ -513,6 +516,11 @@ def create_typed_action(
             StartModelAction.model_validate(
                 raw_action
             )
+        )
+
+    if tool_name == "open_master_drawing":
+        return OpenMasterDrawingAction.model_validate(
+            raw_action
         )
 
     if tool_name == "request_clarification":
@@ -777,6 +785,52 @@ def _build_followup_system_prompt() -> str:
 # -------------------------------------------------------------------------
 # Planner
 # -------------------------------------------------------------------------
+
+MASTER_DRAWING_PART_NUMBER_QUESTION = (
+    "Which part number's master drawing should I open? You can also "
+    "give a revision."
+)
+
+
+def _guard_master_drawing_arguments(
+    tool_arguments: dict[str, Any],
+    user_texts: list[str],
+) -> ClarificationRequiredResult | None:
+    """
+    Ask for the part number when it is missing or does not appear in
+    anything the user wrote; drop a revision the user never gave.
+    """
+
+    user_text = " ".join(user_texts).upper()
+
+    part_number = str(tool_arguments.get("partNumber") or "").strip()
+
+    if not part_number or part_number.upper() not in user_text:
+        log_event(
+            logger,
+            "master_drawing_part_number_required",
+            level=logging.WARNING if part_number else logging.INFO,
+            modelSuppliedUnmentionedPartNumber=bool(part_number),
+        )
+
+        return ClarificationRequiredResult(
+            status="clarification_required",
+            message=MASTER_DRAWING_PART_NUMBER_QUESTION,
+            missingField="partNumber",
+        )
+
+    part_revision = str(tool_arguments.get("partRevision") or "").strip()
+
+    if part_revision and part_revision.upper() not in user_text:
+        log_event(
+            logger,
+            "master_drawing_unmentioned_revision_dropped",
+            level=logging.WARNING,
+        )
+        tool_arguments["partRevision"] = None
+
+    return None
+
 
 async def plan_catia_action(
     user_command: str,
@@ -1098,6 +1152,22 @@ async def plan_catia_action(
         },
     )
 
+    if tool_name == "open_master_drawing":
+        clarification = _guard_master_drawing_arguments(
+            tool_arguments,
+            [
+                normalized_command,
+                *(
+                    message.get("content", "")
+                    for message in trimmed_history
+                    if message.get("role") == "user"
+                ),
+            ],
+        )
+
+        if clarification is not None:
+            return clarification
+
     try:
         typed_action = create_typed_action(
             tool_name=tool_name,
@@ -1184,6 +1254,7 @@ async def plan_catia_action(
             CreateCadDocumentAction,
             DownloadCadAction,
             StartModelAction,
+            OpenMasterDrawingAction,
         ),
     ):
         return ActionRequiredResult(

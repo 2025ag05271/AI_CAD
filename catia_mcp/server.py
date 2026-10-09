@@ -23,6 +23,7 @@ from catia_agent.logging_config import (
 )
 from catia_agent.utils import (
     validate_download_cad_inputs,
+    validate_open_master_drawing_inputs,
     validate_start_model_inputs,
 )
 
@@ -552,6 +553,54 @@ def start_model(
             "partRevision": normalized_part_revision,
             "modelType": normalized_model_type,
             "savePath": normalized_save_path,
+        },
+    )
+
+
+@mcp.tool
+def open_master_drawing(
+    partNumber: str | None = None,
+    partRevision: str | None = None,
+) -> dict[str, Any]:
+    """
+    Prepare an action to open the master drawing of a part.
+
+    Use this tool when the user asks to open, show, or bring up the
+    master drawing of a part. Use open_cad_document instead when the
+    user gives a file path, and download_cad when the user asks to
+    download a CAD file.
+
+    Inputs:
+    - partNumber is required.
+    - partRevision is optional. Leave it empty when the user did not
+      state a revision.
+    - If the user gives a revision but no part number, do not call
+      this tool. Call request_clarification with missingField
+      "partNumber" and ask for the part number.
+
+    Use only values the user explicitly supplied. Never invent or
+    guess a part number or revision.
+
+    This tool prepares an action for the external WPF C# executor. It
+    does not open the drawing directly.
+
+    Args:
+        partNumber: Part number whose master drawing should be opened.
+        partRevision: Optional revision of that part.
+    """
+
+    normalized_part_number, normalized_part_revision = (
+        validate_open_master_drawing_inputs(
+            part_number=partNumber,
+            part_revision=partRevision,
+        )
+    )
+
+    return create_executor_action(
+        action="open_master_drawing",
+        arguments={
+            "partNumber": normalized_part_number,
+            "partRevision": normalized_part_revision,
         },
     )
 

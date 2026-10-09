@@ -177,6 +177,7 @@ CatiaCopilotAgent/
 |   |   |-- CreateCadDocumentHandler.cs
 |   |   |-- DownloadCadHandler.cs
 |   |   |-- StartModelHandler.cs
+|   |   |-- OpenMasterDrawingHandler.cs
 |   |-- Interfaces/
 |   |   |-- ICatiaActionExecutor.cs
 |   |   |-- IOpenCadDocumentHandler.cs
@@ -185,6 +186,7 @@ CatiaCopilotAgent/
 |   |   |-- ICreateCadDocumentHandler.cs
 |   |   |-- IDownloadCadHandler.cs
 |   |   |-- IStartModelHandler.cs
+|   |   |-- IOpenMasterDrawingHandler.cs
 |
 |-- Orchestration/
 |   |-- AgentCommandResult.cs
@@ -275,7 +277,8 @@ that same STA thread.
     "CloseCadDocumentEnabled": true,
         "CreateCadDocumentEnabled": true,
       "DownloadCadEnabled": true,
-      "StartModelEnabled": true
+      "StartModelEnabled": true,
+      "OpenMasterDrawingEnabled": true
   },
   "Logging": {
     "LogLevel": {
@@ -373,6 +376,7 @@ services.AddSingleton<ICloseCadDocumentHandler, CloseCadDocumentHandler>();
 services.AddSingleton<ICreateCadDocumentHandler, CreateCadDocumentHandler>();
 services.AddSingleton<IDownloadCadHandler, DownloadCadHandler>();
 services.AddSingleton<IStartModelHandler, StartModelHandler>();
+services.AddSingleton<IOpenMasterDrawingHandler, OpenMasterDrawingHandler>();
 services.AddSingleton<IChatService, ChatService>();
 services.AddSingleton<ChatViewModel>();
 services.AddSingleton<ChatWindow>();
@@ -755,6 +759,9 @@ return action.Name switch
     "start_model" when toolOptions.StartModelEnabled =>
         await ExecuteStartModelAsync(...),
 
+    "open_master_drawing" when toolOptions.OpenMasterDrawingEnabled =>
+        await ExecuteOpenMasterDrawingAsync(...),
+
     "open_cad_document" =>
         ActionExecutionResultRequest.Failed(
             actionId,
@@ -772,6 +779,12 @@ return action.Name switch
             actionId,
             "TOOL_DISABLED",
             "The start_model tool is disabled."),
+
+    "open_master_drawing" =>
+        ActionExecutionResultRequest.Failed(
+            actionId,
+            "TOOL_DISABLED",
+            "The open_master_drawing tool is disabled."),
 
     _ =>
         ActionExecutionResultRequest.Failed(
@@ -1219,6 +1232,55 @@ Python reads only `success_message` for user-facing completion text.
 Keep this payload minimal and stable so the graph can render the final
 message directly.
 
+### `open_master_drawing`
+
+Opens the master drawing of a part. Python always sends both keys;
+`partRevision` is `null` when the user did not give one:
+
+```json
+{
+    "partNumber": "674089800A",
+    "partRevision": null
+}
+```
+
+```json
+{
+    "partNumber": "674089800A",
+    "partRevision": "01"
+}
+```
+
+Python guarantees `partNumber` is present, trimmed, upper-cased, and was
+actually typed by the user. A revision-only request never reaches .NET;
+Python asks the user for the part number instead. .NET should still
+validate defensively:
+
+- Reject a missing or empty `partNumber` with
+  `INVALID_ACTION_ARGUMENTS`.
+- When `partRevision` is `null`, apply the business rule for "no
+  revision given" (for example, open the latest released master
+  drawing), and report which revision was actually opened in the
+  result.
+
+Suggested success payload (keep fields stable once chosen):
+
+```json
+{
+    "documentName": "674089800A_MD.CATDrawing",
+    "partNumber": "674089800A",
+    "partRevision": "01",
+    "fullPath": "C:\\PLMCache\\674089800A_MD.CATDrawing"
+}
+```
+
+Python builds the completion message from `documentName`, then
+`partNumber` + `partRevision`, then `partNumber`. Suggested failure codes
+include `MASTER_DRAWING_NOT_FOUND`, along with the existing
+`CATIA_NOT_RUNNING` and `DOCUMENT_OPEN_FAILED`. Call
+`CatiaForegroundHelper.TryBringCatiaToForeground()` after a successful
+open, as `OpenCadDocumentHandler` does.
+
 ## 16. Adding a new tool
 
 Every new tool must be implemented on both the Python and .NET sides.
@@ -1462,6 +1524,9 @@ Before validating an Agent command, confirm:
 [ ] Dispatcher has an explicit download_cad branch and disabled fallback
 [ ] Dispatcher has an explicit start_model branch and disabled fallback
 [ ] start_model supports SAB/DU via outsystemsId and SEATBELT via partNumber + partRevision
+[ ] open_master_drawing flag (OpenMasterDrawingEnabled), handler
+    (IOpenMasterDrawingHandler), and dispatcher branch with disabled
+    fallback are in place; partRevision may be null
 [ ] Python MCP and Pydantic mappings exist
 [ ] AgentResponses.cs models action_required, completed,
     execution_failed, non_agentic, clarification_required,

@@ -466,3 +466,59 @@ def validate_start_model_inputs(
     raise ValueError(
         "Unsupported start model type."
     )
+
+
+# Deliberately permissive until the master-drawing numbering scheme is
+# confirmed; tighten to the PLM/CAD patterns above if it matches them.
+MASTER_DRAWING_PART_NUMBER_RE = re.compile(
+    r"^[A-Z0-9][A-Z0-9._-]{0,49}$"
+)
+
+MASTER_DRAWING_REVISION_RE = re.compile(
+    r"^[A-Z0-9][A-Z0-9._-]{0,19}$"
+)
+
+
+def validate_open_master_drawing_inputs(
+    *,
+    part_number: str | None,
+    part_revision: str | None,
+) -> tuple[str, str | None]:
+    """
+    Return (partNumber, partRevision) normalized to upper case.
+
+    partNumber is required; partRevision is optional.
+    """
+
+    normalized_part_number = (
+        (part_number or "").strip().upper() or None
+    )
+    normalized_part_revision = (
+        (part_revision or "").strip().upper() or None
+    )
+
+    if normalized_part_number is None:
+        raise ValueError(
+            "open_master_drawing requires partNumber."
+        )
+
+    if not MASTER_DRAWING_PART_NUMBER_RE.fullmatch(
+        normalized_part_number
+    ):
+        raise ValueError(
+            "partNumber may contain only letters, digits, '.', "
+            "'_' or '-' and must be at most 50 characters."
+        )
+
+    if (
+        normalized_part_revision is not None
+        and not MASTER_DRAWING_REVISION_RE.fullmatch(
+            normalized_part_revision
+        )
+    ):
+        raise ValueError(
+            "partRevision may contain only letters, digits, '.', "
+            "'_' or '-' and must be at most 20 characters."
+        )
+
+    return normalized_part_number, normalized_part_revision

@@ -220,6 +220,28 @@ def _build_action_success_message(
             "The CATIA start model was launched successfully."
         )
 
+    if action_name == "open_master_drawing":
+        document_name = data.get("documentName")
+        part_number = data.get("partNumber")
+        part_revision = data.get("partRevision")
+
+        if document_name:
+            return f"{document_name} was opened successfully."
+
+        if part_number and part_revision:
+            return (
+                f"The master drawing for {part_number} revision "
+                f"{part_revision} was opened successfully."
+            )
+
+        if part_number:
+            return (
+                f"The master drawing for {part_number} was "
+                "opened successfully."
+            )
+
+        return "The master drawing was opened successfully."
+
     return (
         "The CATIA action completed successfully."
     )

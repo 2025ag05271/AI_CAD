@@ -1187,6 +1187,8 @@ start_model             Prepare launching an approved CATIA start model.
                         SAB/DU require outsystemsId + afisNumber;
                         customName is optional for SAB/DU.
                         SEATBELT requires partNumber + partRevision.
+open_master_drawing     Prepare opening the master drawing of a part.
+                        partNumber is required; partRevision is optional.
 ```
 
 `download_cad` is the single approved tool for user intents such as
@@ -1235,6 +1237,30 @@ Non-`X` seatbelt part numbers use revisions like `00` or `01`.
 IC start model (`IC`, `inflatable curtain`, `curtain airbag`) is currently
 unsupported. Requests that ask to start IC return
 `unsupported_request` with message `Currently IC start model is not supported.`
+
+`open_master_drawing` opens the master drawing of a part. Accepted inputs:
+
+- `partNumber` only, for example "open the master drawing for 674089800A"
+- `partNumber` + `partRevision`, for example "open master drawing
+  674089800A revision 01"
+
+Both values are trimmed and upper-cased. They may contain letters,
+digits, `.`, `_` and `-` (part number up to 50 characters, revision up to
+20). This format check is deliberately loose; tighten
+`MASTER_DRAWING_PART_NUMBER_RE` / `MASTER_DRAWING_REVISION_RE` in
+`catia_agent/utils.py` once the numbering scheme is confirmed.
+
+The planner enforces the input rules deterministically
+(`_guard_master_drawing_arguments` in `catia_agent/planner.py`), so they
+do not depend on the model following the tool description:
+
+- A missing `partNumber` (for example, the user gave only a revision)
+  returns `clarification_required` with `missingField: "partNumber"`.
+- A `partNumber` that does not appear in anything the user wrote (in the
+  current message or earlier user turns) is treated as invented, and the
+  same clarification is returned.
+- A `partRevision` the user never wrote is dropped, so the drawing opens
+  without a revision rather than an invented one.
 
 ### Orchestrator-only tools (not on MCP)
 

@@ -14,6 +14,7 @@ from pydantic import (
 from catia_agent.config import settings
 from catia_agent.utils import (
     validate_download_cad_inputs,
+    validate_open_master_drawing_inputs,
     validate_start_model_inputs,
 )
 
@@ -253,6 +254,27 @@ class StartModelArguments(InternalModel):
         return self
 
 
+class OpenMasterDrawingArguments(InternalModel):
+    partNumber: NonEmptyString
+    partRevision: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def validate_identifiers(
+        self,
+    ) -> OpenMasterDrawingArguments:
+        part_number, part_revision = (
+            validate_open_master_drawing_inputs(
+                part_number=self.partNumber,
+                part_revision=self.partRevision,
+            )
+        )
+
+        object.__setattr__(self, "partNumber", part_number)
+        object.__setattr__(self, "partRevision", part_revision)
+
+        return self
+
+
 class RequestClarificationArguments(InternalModel):
     question: NonEmptyString
 
@@ -317,6 +339,11 @@ class StartModelAction(InternalModel):
     arguments: StartModelArguments
 
 
+class OpenMasterDrawingAction(InternalModel):
+    action: Literal["open_master_drawing"]
+    arguments: OpenMasterDrawingArguments
+
+
 class RequestClarificationAction(InternalModel):
     action: Literal["request_clarification"]
     arguments: RequestClarificationArguments
@@ -341,7 +368,8 @@ CatiaAction: TypeAlias = Annotated[
     | CloseCadDocumentAction
     | CreateCadDocumentAction
     | DownloadCadAction
-    | StartModelAction,
+    | StartModelAction
+    | OpenMasterDrawingAction,
     Field(discriminator="action"),
 ]
 
