@@ -207,6 +207,33 @@ class Settings(BaseSettings):
     # readiness check.
     readiness_force_mcp_refresh: bool = False
 
+    # Shared secret the agent sends as a bearer token and the MCP server
+    # requires. Empty disables MCP authentication (local dev only).
+    mcp_api_key: SecretStr | None = Field(
+        default=None,
+        max_length=4096,
+    )
+
+    # enforce: drop tools whose definition differs from the pinned
+    # manifest; warn: log and keep them; off: no pin check.
+    mcp_tool_pinning_mode: Literal["enforce", "warn", "off"] = "enforce"
+
+    mcp_max_tool_count: int = Field(default=50, ge=1, le=500)
+
+    mcp_max_tool_description_characters: int = Field(
+        default=6_000,
+        ge=100,
+        le=100_000,
+    )
+
+    mcp_max_tool_schema_bytes: int = Field(
+        default=16_384,
+        ge=256,
+        le=1_048_576,
+    )
+
+    mcp_max_tool_properties: int = Field(default=30, ge=1, le=500)
+
     # ------------------------------------------------------------------
     # Embedding-based ask-vs-agent intent classification
     #
@@ -458,6 +485,17 @@ class Settings(BaseSettings):
         normalized_value = value.strip()
         return normalized_value or None
 
+    @field_validator("mcp_api_key", mode="before")
+    @classmethod
+    def normalize_mcp_api_key(
+        cls,
+        value: object,
+    ) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+
+        return value
+
     @field_validator("azure_foundry_endpoint")
     @classmethod
     def normalize_azure_foundry_endpoint(
@@ -577,6 +615,18 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Technical error details must not be exposed "
                     "in the production environment."
+                )
+
+            if self.mcp_api_key is None:
+                raise ValueError(
+                    "mcp_api_key is required in the production "
+                    "environment."
+                )
+
+            if self.mcp_tool_pinning_mode != "enforce":
+                raise ValueError(
+                    "mcp_tool_pinning_mode must be 'enforce' in the "
+                    "production environment."
                 )
 
         return self

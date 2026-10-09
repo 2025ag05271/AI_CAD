@@ -10,6 +10,7 @@ from fastmcp import Client
 
 from catia_agent.config import settings
 from catia_agent.logging_config import Stopwatch, get_logger
+from catia_agent.mcp_guardrails import apply_tool_guardrails
 
 
 logger = get_logger(__name__)
@@ -241,12 +242,14 @@ class McpToolCatalogService:
         server_url: str,
         cache_ttl_seconds: float,
         request_timeout_seconds: float,
+        api_key: str | None = None,
     ) -> None:
         self._server_url = server_url
         self._cache_ttl_seconds = cache_ttl_seconds
         self._request_timeout_seconds = (
             request_timeout_seconds
         )
+        self._api_key = api_key
 
         self._snapshot: ToolCatalogSnapshot | None = None
         self._cache_lock = asyncio.Lock()
@@ -270,7 +273,10 @@ class McpToolCatalogService:
             },
         )
 
-        client = Client(self._server_url)
+        client = Client(
+            self._server_url,
+            auth=self._api_key,
+        )
 
         stopwatch = Stopwatch()
 
@@ -374,6 +380,15 @@ class McpToolCatalogService:
 
             discovered_names.add(tool_name)
             converted_tools.append(converted_tool)
+
+        converted_tools = apply_tool_guardrails(
+            converted_tools
+        )
+
+        if not converted_tools:
+            raise McpToolDiscoveryError(
+                "No CATIA MCP tool passed the tool guardrails."
+            )
 
         snapshot = ToolCatalogSnapshot(
             tools=tuple(converted_tools),
@@ -549,6 +564,11 @@ tool_catalog_service = McpToolCatalogService(
     ),
     request_timeout_seconds=(
         settings.mcp_request_timeout_seconds
+    ),
+    api_key=(
+        settings.mcp_api_key.get_secret_value()
+        if settings.mcp_api_key is not None
+        else None
     ),
 )
 

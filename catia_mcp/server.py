@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import hmac
+import logging
 from pathlib import PureWindowsPath
 from typing import Any, Literal
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import TokenVerifier
+from fastmcp.server.auth.auth import AccessToken
+from fastmcp.server.middleware import (
+    CallNext,
+    Middleware,
+    MiddlewareContext,
+)
+
+from catia_agent.config import settings
 from catia_agent.logging_config import (
     get_logger,
+    log_duration,
     log_event,
     setup_logging,
 )
@@ -16,6 +28,55 @@ from catia_agent.utils import (
 
 
 logger = get_logger(__name__)
+
+
+# -------------------------------------------------------------------------
+# Guardrails: authentication and request audit
+# -------------------------------------------------------------------------
+
+class SharedSecretTokenVerifier(TokenVerifier):
+    """
+    Accept only the bearer token configured as CATIA_AGENT_MCP_API_KEY.
+    """
+
+    def __init__(self, api_key: str) -> None:
+        super().__init__()
+        self._api_key = api_key.encode("utf-8")
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if hmac.compare_digest(token.encode("utf-8"), self._api_key):
+            return AccessToken(
+                token=token,
+                client_id="catia-agent",
+                scopes=[],
+            )
+
+        log_event(
+            logger,
+            "mcp_auth_rejected",
+            level=logging.WARNING,
+            securityEvent=True,
+        )
+        return None
+
+
+class RequestAuditMiddleware(Middleware):
+    async def on_request(
+        self,
+        context: MiddlewareContext,
+        call_next: CallNext,
+    ) -> Any:
+        with log_duration(logger, "mcp_request", method=context.method):
+            return await call_next(context)
+
+
+def _build_auth() -> SharedSecretTokenVerifier | None:
+    if settings.mcp_api_key is None:
+        return None
+
+    return SharedSecretTokenVerifier(
+        settings.mcp_api_key.get_secret_value()
+    )
 
 
 # -------------------------------------------------------------------------
@@ -30,6 +91,8 @@ mcp = FastMCP(
         "external WPF C# executor. This MCP server does not access "
         "CATIA, execute COM operations, or modify CAD documents."
     ),
+    auth=_build_auth(),
+    middleware=[RequestAuditMiddleware()],
 )
 
 
@@ -509,6 +572,7 @@ def run_server() -> None:
         "mcp_server_starting",
         host="127.0.0.1",
         port=8001,
+        authenticationEnabled=settings.mcp_api_key is not None,
     )
 
     mcp.run(

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from catia_agent.config import settings
 from catia_agent.logging_config import Stopwatch, get_logger
+from catia_agent.mcp_guardrails import APPROVED_CATIA_TOOL_NAMES
 from catia_agent.mcp_tools import (
     load_ollama_tools_from_mcp,
 )
@@ -188,16 +189,6 @@ ORCHESTRATOR_TOOL_NAMES = frozenset(
         "route_to_general_chat",
         "report_unsupported_catia_action",
         "complete_request",
-    }
-)
-
-APPROVED_CATIA_TOOL_NAMES = frozenset(
-    {
-        "open_cad_document",
-        "close_cad_document",
-        "create_cad_document",
-        "download_cad",
-        "start_model",
     }
 )
 
@@ -824,20 +815,6 @@ async def plan_catia_action(
         tool["function"]["name"]
         for tool in mcp_tools
     }
-
-    unexpected_tools = (
-        available_tool_names
-        - APPROVED_CATIA_TOOL_NAMES
-    )
-
-    if unexpected_tools:
-        raise ValueError(
-            "The MCP server exposed CATIA tools that are not "
-            "integrated by the Agent: "
-            + ", ".join(
-                sorted(unexpected_tools)
-            )
-        )
 
     missing_tools = (
         APPROVED_CATIA_TOOL_NAMES

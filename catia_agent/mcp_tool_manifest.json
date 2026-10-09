@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "tools": {
+    "close_cad_document": "f98a38758baed275ed726eb12f233b138a52647ab85a5ecbd562d5e2d6190935",
+    "create_cad_document": "0f3753f8eadf5293a4a205dbac6925703b489dd319e3187d8bf645560f9bb956",
+    "download_cad": "5b014c667e07d91f4cda56abc9664e4f59243ac7a4e1d97a6f8e4ecd482444df",
+    "open_cad_document": "2ad08239482c42670eab14fc01de1672bb34e26516ff0ae0946ad33380f81d0b",
+    "start_model": "0279a26edf8609abb2a1860609ca02424db4713f678e40dc9a6502cf40cb1df7"
+  }
+}

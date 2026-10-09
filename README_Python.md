@@ -1281,6 +1281,60 @@ or `POST /api/v1/tools/cache/clear` (admin key required in production).
 forcing a fresh MCP round trip on every call, unless
 `CATIA_AGENT_READINESS_FORCE_MCP_REFRESH` is set to `true`.
 
+### MCP guardrails
+
+The tool definitions MCP returns are text the model reads and trusts,
+so they are treated as untrusted input. Every catalog refresh passes
+through `apply_tool_guardrails` in `catia_agent/mcp_guardrails.py`
+before it is cached or shown to the model. Each tool is checked as
+follows, and a tool that fails a check is dropped and logged as
+`mcp_tool_rejected` (`securityEvent: true`):
+
+1. **Allowlist.** Only names in `APPROVED_CATIA_TOOL_NAMES` are kept.
+   Unknown tools used to fail every request with a 500; now they are
+   dropped.
+2. **Content inspection (tool poisoning).** Rejects descriptions or
+   schema text containing prompt-injection markers ("ignore previous
+   instructions", `<system>`, "always call this tool", "do not tell the
+   user", URLs) or hidden Unicode (zero-width, bidi override, tag
+   characters). Size limits apply: `CATIA_AGENT_MCP_MAX_TOOL_COUNT`,
+   `..._MAX_TOOL_DESCRIPTION_CHARACTERS`, `..._MAX_TOOL_SCHEMA_BYTES`
+   and `..._MAX_TOOL_PROPERTIES`.
+3. **Definition pinning (rug pull).** The SHA-256 of each tool's name,
+   description and input schema must match
+   `catia_agent/mcp_tool_manifest.json`.
+   `CATIA_AGENT_MCP_TOOL_PINNING_MODE` controls what happens on a
+   mismatch: `enforce` (default; mandatory in production) drops the
+   tool, `warn` logs and keeps it, `off` skips the check. If the
+   manifest is missing, `enforce` fails closed.
+
+If no tool survives, catalog discovery fails with 503
+`MCP_REQUEST_FAILED` rather than letting the model plan with an
+unverified catalog.
+
+Whenever a tool in `catia_mcp/server.py` is intentionally changed,
+re-pin it and commit the manifest:
+
+```powershell
+python -m catia_agent.mcp_guardrails pin
+```
+
+The command lists tools in-process from the server source (no network)
+and refuses to pin unsafe or unapproved tools.
+`tests/test_mcp_guardrails.py` fails if the manifest is out of date.
+
+**Authentication.** When `CATIA_AGENT_MCP_API_KEY` is set, the MCP
+server requires it as a bearer token (`SharedSecretTokenVerifier`,
+constant-time compare) and the agent sends it. Requests with a missing
+or wrong token get 401, and a wrong token is logged as
+`mcp_auth_rejected`. The key is required in production. Both processes
+read the same `.env`, so set it once.
+
+**Audit.** The MCP server logs every MCP request as
+`mcp_request_completed` or `mcp_request_failed`, with `method` and
+`durationMs`. FastMCP's host and origin protection is on by default for
+the loopback binding.
+
 ## 11. CATIA runtime context
 
 The .NET client may send a snapshot containing:
@@ -1351,8 +1405,8 @@ Examples of deterministic Python validation:
     `CATPart/CATProduct/CATDrawing`
   - `savePath` defaults to `C:\Temp` and must be absolute when set
 - Exact typed action model required for each tool.
-- Unknown MCP tools rejected (the planner raises if MCP publishes a tool
-  outside `APPROVED_CATIA_TOOL_NAMES`).
+- Unknown, poisoned, oversized or unpinned MCP tools are dropped before
+  the model sees them (see "MCP guardrails" in Section 10).
 - Returned `actionId` on `POST .../action-results` must match the pending
   action.
 - `ActionExecutionResultRequest` enforces that `errorCode` and
@@ -1559,9 +1613,12 @@ Add the new action to the `CatiaAction` union.
 
 ### Step 3: Extend the approved-tool set and dispatcher
 
-In `catia_agent/planner.py`:
+In `catia_agent/mcp_guardrails.py`:
 
 - Add `"list_open_documents"` to `APPROVED_CATIA_TOOL_NAMES`.
+
+In `catia_agent/planner.py`:
+
 - Add a branch in `create_typed_action` that validates and returns
   `ListOpenDocumentsAction`.
 - Add the new action type to the `isinstance(...)` check at the bottom
@@ -1597,7 +1654,13 @@ For tools with arguments, validate at least:
 In `_build_action_success_message` inside `catia_agent/graph.py`,
 translate the external result into a concise user-facing sentence.
 
-### Step 6: Restart MCP and refresh tools
+### Step 6: Pin, restart MCP and refresh tools
+
+```powershell
+python -m catia_agent.mcp_guardrails pin
+```
+
+Then restart the MCP server and refresh the catalog:
 
 ```http
 POST /api/v1/tools/cache/clear
@@ -1712,7 +1775,8 @@ rollout:
   checkpoint store.
 - **Authentication between .NET and FastAPI** on the Agent endpoints
   (the admin key today only protects the cache-clear endpoint).
-- **Authentication or a controlled local transport for MCP.**
+- **MCP transport hardening beyond the shared secret** (for example,
+  stdio or in-process transport, or short-lived tokens).
 - **Tool-level authorization** for modifying operations.
 - **Approved-directory allowlists** enforced in Python in addition to C#.
 - **Human approval for modifying or persistent actions** (see Section 16).
