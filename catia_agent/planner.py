@@ -9,10 +9,6 @@ from pydantic import ValidationError
 
 from catia_agent.config import settings
 from catia_agent.logging_config import Stopwatch, get_logger, log_event
-from catia_agent.mcp_guardrails import APPROVED_CATIA_TOOL_NAMES
-from catia_agent.mcp_tools import (
-    load_ollama_tools_from_mcp,
-)
 from catia_agent.model_providers import (
     MODEL_NAME,
     ModelProviderError,
@@ -43,6 +39,7 @@ from catia_agent.models import (
     StartModelAction,
     UnsupportedRequestResult,
 )
+from catia_agent.tool_catalog import get_model_tools
 
 
 logger = get_logger(__name__)
@@ -863,27 +860,12 @@ async def plan_catia_action(
             reason="operation_not_allowed",
         )
 
-    mcp_tools = await load_ollama_tools_from_mcp()
+    executor_tools = await get_model_tools()
 
     available_tool_names = {
         tool["function"]["name"]
-        for tool in mcp_tools
+        for tool in executor_tools
     }
-
-    missing_tools = (
-        APPROVED_CATIA_TOOL_NAMES
-        - available_tool_names
-    )
-
-    if missing_tools:
-        logger.warning(
-            "mcp_approved_tools_missing",
-            extra={
-                "missingToolNames": sorted(
-                    missing_tools
-                ),
-            },
-        )
 
     # Sorted (not just concatenated) so the tool list is byte-identical
     # across calls regardless of MCP catalog refresh timing/order.
@@ -892,7 +874,7 @@ async def plan_catia_action(
     # invalidate that prefix for no reason. See model_providers.py for
     # the corresponding cached_tokens usage logging.
     available_tools = sorted(
-        [*mcp_tools, *ORCHESTRATOR_TOOLS],
+        [*executor_tools, *ORCHESTRATOR_TOOLS],
         key=lambda tool: tool["function"]["name"],
     )
 

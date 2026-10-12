@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 # Must run before any module builds an httpx/ssl client (e.g. via
 # catia_agent.graph -> model_providers), so it patches the OS
 # certificate store into Python's ssl module in time. This is required
@@ -8,6 +10,11 @@ from __future__ import annotations
 import truststore
 
 truststore.inject_into_ssl()
+
+os.environ.setdefault(
+    "CATIA_AGENT_RUNTIME_MODE",
+    "legacy_api",
+)
 
 import asyncio
 import hmac

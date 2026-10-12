@@ -1,19 +1,19 @@
 # CATIA Agent Client and Executor
 
-## .NET Framework 4.8.1, WPF, FastAPI Client, Tool Dispatcher, and CATIA COM Architecture Guide
+## .NET Framework 4.8.1, WPF, JSON Worker Client, Tool Dispatcher, and CATIA COM Architecture Guide
 
 ## 1. Purpose
 
-This document describes the .NET side of the CATIA Agent. The .NET
-application receives a user command from the chat interface, sends the
-command and current CATIA context to the local FastAPI backend, receives a
-validated action, dispatches the action to an explicitly registered C#
-handler, performs the CATIA COM operation, and submits the structured
-result back to FastAPI.
+This document describes the .NET side of the CATIA Agent. The WPF
+application starts a long-lived Python worker executable and exchanges
+versioned JSON Lines over redirected standard input/output. It receives a
+validated action, dispatches it to an explicitly registered C# handler,
+performs the CATIA COM operation, and sends the structured result back to
+the worker using the same JSON protocol.
 
-The .NET layer is the final authority for CATIA execution. Neither the
-tool-calling model, LangGraph, FastAPI, nor the MCP server directly invokes
-CATIA COM.
+The .NET layer remains the final authority for CATIA execution. Python
+does not invoke CATIA COM. FastAPI and MCP are not started in the current
+deployment.
 
 The Python backend uses Qwen 3.6 27B hosted on Azure AI Foundry as its
 tool-calling model, behind a provider-neutral abstraction, so a future
@@ -32,9 +32,9 @@ ChatViewModel.SendMessageAsync
     v
 ICatiaAgentCommandHandler.HandleAsync
     |
-    +--> GET /ready
+    +--> Start CatiaAgentWorker.exe
     +--> Collect CATIA context
-    +--> POST /api/v1/agent/runs
+    +--> Send start_run JSON
             |
             v
    Orchestrator decision (Python)
@@ -64,7 +64,7 @@ API (GPT-4)   +--> Tool enabled?
     |   ActionExecutionResultRequest
     |               |
     |               v
-    |   POST /api/v1/agent/runs/{runId}/action-results
+    |   Send action_result JSON
     |               |
     |               v
     |     completed or execution_failed
@@ -79,9 +79,8 @@ API (GPT-4)   +--> Tool enabled?
 ```
 
 `clarification_required`, `unsupported_request`, `planning_error`, and
-`invalid_request` are not shown above for clarity. They skip the
-dispatcher entirely and go straight to `AgentCommandResult`, the same as
-`non_agentic` and `completed`.
+`invalid_request` skip the dispatcher and go straight to
+`AgentCommandResult`, as do `non_agentic` and `completed`.
 
 ## 3. Responsibilities
 
@@ -96,9 +95,10 @@ dispatcher entirely and go straight to `AgentCommandResult`, the same as
 
 ### `CatiaAgentCommandHandler`
 
-- Verifies Agent readiness.
+- Starts the worker, waits for its `ready` JSON message, and monitors its
+  process lifetime.
 - Collects CATIA context.
-- Starts the Agent run.
+- Sends a `start_run` JSON message and reads the matching response.
 - Reads the response `status` and routes accordingly:
   - `action_required` runs the existing dispatch loop.
   - `non_agentic` calls the existing Chat API with the original user
@@ -109,19 +109,18 @@ dispatcher entirely and go straight to `AgentCommandResult`, the same as
     and `invalid_request` are returned to the user as-is using their
     `message` field. They are terminal and never require a follow-up call.
 - Executes actions through `ICatiaActionExecutor`.
-- Submits results to FastAPI.
+- Sends action results to the worker as JSON.
 - Returns a final `AgentCommandResult`.
 
-### `CatiaAgentApiClient`
+### `PythonAgentWorkerClient`
 
-- Owns REST communication with FastAPI.
-- Reuses a managed `HttpClient` with `BaseAddress` and `ApiPrefix`
-  (default `/api/v1`) supplied by `CatiaAgentOptions`.
-- Sends `X-Request-ID`.
-- Deserializes Agent responses with `JsonSerializerOptions` configured to
-  ignore unknown properties so new backend fields do not break the
-  client.
-- Converts FastAPI errors into `CatiaAgentApiException`.
+- Owns the worker process and its redirected standard streams.
+- Writes one UTF-8 JSON object plus newline per request and reads one
+  response line per request.
+- Keeps standard output dedicated to protocol data and drains standard
+  error for diagnostics.
+- Correlates each response using `requestId` and tolerates unknown JSON
+  properties for forward-compatible payloads.
 
 ### `CatiaActionDispatcher`
 
@@ -143,13 +142,13 @@ dispatcher entirely and go straight to `AgentCommandResult`, the same as
 ```text
 CatiaCopilotAgent/
 |
-|-- Client/
-|   |-- ICatiaAgentApiClient.cs
-|   |-- CatiaAgentApiClient.cs
-|   |-- CatiaAgentApiException.cs
+|-- Worker/
+|   |-- IPythonAgentWorkerClient.cs
+|   |-- PythonAgentWorkerClient.cs
+|   |-- PythonWorkerProtocol.cs
 |
 |-- Configuration/
-|   |-- CatiaAgentOptions.cs
+|   |-- CatiaAgentWorkerOptions.cs
 |
 |-- Context/
 |   |-- ICatiaContextProvider.cs
@@ -171,21 +170,9 @@ CatiaCopilotAgent/
 |   |-- CatiaToolOptions.cs
 |   |-- Helpers/
 |   |   |-- CatiaActionDispatcher.cs
-|   |   |-- OpenCadDocumentHandler.cs
-|   |   |-- GetActiveDocumentHandler.cs
-|   |   |-- CloseCadDocumentHandler.cs
-|   |   |-- CreateCadDocumentHandler.cs
-|   |   |-- DownloadCadHandler.cs
-|   |   |-- StartModelHandler.cs
 |   |   |-- OpenMasterDrawingHandler.cs
 |   |-- Interfaces/
 |   |   |-- ICatiaActionExecutor.cs
-|   |   |-- IOpenCadDocumentHandler.cs
-|   |   |-- IGetActiveDocumentHandler.cs
-|   |   |-- ICloseCadDocumentHandler.cs
-|   |   |-- ICreateCadDocumentHandler.cs
-|   |   |-- IDownloadCadHandler.cs
-|   |   |-- IStartModelHandler.cs
 |   |   |-- IOpenMasterDrawingHandler.cs
 |
 |-- Orchestration/
@@ -265,38 +252,30 @@ that same STA thread.
 
 ```json
 {
-  "CatiaAgent": {
-    "BaseAddress": "http://127.0.0.1:8000",
-    "ApiPrefix": "/api/v1",
-    "RequestTimeout": "00:02:30",
-    "MaximumActionsPerRun": 20
+  "CatiaAgentWorker": {
+    "ExecutablePath": "<application directory>\\CatiaAgentWorker.exe",
+    "StartupTimeout": "00:00:30",
+    "MaximumMessageBytes": 1048576
   },
   "CatiaAgentTools": {
-    "OpenCadDocumentEnabled": true,
-    "GetActiveDocumentEnabled": true,
-    "CloseCadDocumentEnabled": true,
-        "CreateCadDocumentEnabled": true,
-      "DownloadCadEnabled": true,
-      "StartModelEnabled": true,
-      "OpenMasterDrawingEnabled": true
+    "OpenMasterDrawingEnabled": true
   },
   "Logging": {
     "LogLevel": {
       "Default": "Information",
       "Microsoft": "Warning",
       "System": "Warning",
-      "System.Net.Http.HttpClient": "Warning"
+      "System.Diagnostics.Process": "Warning"
     }
   }
 }
 ```
 
-`ApiPrefix` is a new field. Making the prefix configurable protects the
-client from another breaking rename: when the backend eventually
-introduces `/api/v2`, only this value has to change. The client must
-concatenate `BaseAddress` + `ApiPrefix` + the endpoint path when building
-Agent and Tools requests. Health endpoints (`/health`, `/ready`) stay
-unversioned and must not use the prefix.
+The worker executable is launched as a child process with redirected
+standard input, output, and error. No BaseAddress, API prefix, or local
+port is configured. The .NET host supplies Azure AI Foundry settings
+through its environment; never put the bearer key in the executable or
+source-controlled configuration.
 
 ### Loading configuration
 
@@ -308,22 +287,17 @@ builder.Configuration.Sources.Clear();
 builder.Configuration.AddEnvironmentVariables();
 ```
 
-An `appsettings.json` file is **not** shipped or loaded today. All
-`CatiaAgent` and `CatiaAgentTools` values fall back to the defaults
-defined on `CatiaAgentOptions` and `CatiaToolOptions`, or must be
-supplied via environment variables using the standard
-`CatiaAgent__BaseAddress` / `CatiaAgent__ApiPrefix` /
-`CatiaAgentTools__OpenCadDocumentEnabled` /
-`CatiaAgentTools__DownloadCadEnabled` /
-`CatiaAgentTools__StartModelEnabled` convention. Adding a JSON file
-provider is a planned improvement; when it is added, remember that the
-host process is CATIA, so `AppContext.BaseDirectory` will point at the
-CATIA install directory, not this assembly's output folder.
+An `appsettings.json` file is not shipped or loaded today. Bind worker
+options from the host configuration/environment using the standard
+`CatiaAgentWorker__ExecutablePath` and
+`CatiaAgentTools__OpenMasterDrawingEnabled` names. Resolve the executable
+relative to the application/add-in directory, not the CATIA installation
+directory.
 
 ### Options usage
 
-- `CatiaAgentOptions` contains BaseAddress, ApiPrefix, timeout, and
-  maximum actions.
+- `CatiaAgentWorkerOptions` contains the executable path, startup timeout,
+  and message-size limit.
 - `CatiaToolOptions` contains enabled and disabled tool flags.
 - `IOptions<T>` is sufficient for process-lifetime configuration.
 - `IOptionsMonitor<T>` is preferred for reloadable tool settings.
@@ -346,21 +320,21 @@ explicitly registered.
 
 ## 7. Dependency injection
 
-Call the extension once in `CatiaChatBotMain.ConfigureServices`:
+Register the worker client once in `CatiaChatBotMain.ConfigureServices`:
 
 ```csharp
-services.AddCatiaAgent(configuration);
+services.AddPythonAgentWorker(configuration);
 ```
 
 The extension should register:
 
 ```text
-CatiaAgentOptions
+CatiaAgentWorkerOptions
 CatiaToolOptions
-ICatiaAgentApiClient
+IPythonAgentWorkerClient
 ICatiaActionExecutor
 ICatiaAgentCommandHandler
-Managed HttpClient
+Managed Python worker process
 ```
 
 `CatiaChatBotMain.ConfigureServices` registers the application-specific
@@ -370,13 +344,8 @@ CATIA services:
 services.AddSingleton(catiaApplication);
 services.AddSingleton<CatiaExecutionGate>();
 services.AddSingleton<ICatiaContextProvider, CatiaContextProvider>();
-services.AddSingleton<IOpenCadDocumentHandler, OpenCadDocumentHandler>();
-services.AddSingleton<IGetActiveDocumentHandler, GetActiveDocumentHandler>();
-services.AddSingleton<ICloseCadDocumentHandler, CloseCadDocumentHandler>();
-services.AddSingleton<ICreateCadDocumentHandler, CreateCadDocumentHandler>();
-services.AddSingleton<IDownloadCadHandler, DownloadCadHandler>();
-services.AddSingleton<IStartModelHandler, StartModelHandler>();
 services.AddSingleton<IOpenMasterDrawingHandler, OpenMasterDrawingHandler>();
+services.AddSingleton<IPythonAgentWorkerClient, PythonAgentWorkerClient>();
 services.AddSingleton<IChatService, ChatService>();
 services.AddSingleton<ChatViewModel>();
 services.AddSingleton<ChatWindow>();
@@ -535,83 +504,49 @@ If the UI later needs to visually indicate which path a response took
 that purely from the returned `AgentCommandOutcome`, not from a
 separate mode field.
 
-## 9. FastAPI client interaction
+## 9. JSON worker interaction
 
-The .NET client calls only FastAPI. It does not call MCP, Ollama, or any
-other model provider directly.
+The .NET client does not call FastAPI, MCP, or Ollama. It launches the
+Python worker and uses the versioned JSON Lines contract in
+[WORKER_PROTOCOL.md](WORKER_PROTOCOL.md).
 
-### Readiness
+Configure `ProcessStartInfo` with `UseShellExecute = false`, redirected
+standard input/output/error, and `CreateNoWindow = true`. Read stdout
+line-by-line as protocol data and drain stderr separately for logs. Wait
+for the worker's `ready` message before accepting commands. The worker
+warms the bundled BGE model before sending `ready`.
 
-```http
-GET /ready
-```
+Set `CATIA_AGENT_RUNTIME_MODE=worker` in `ProcessStartInfo.Environment`.
+Supply the Azure AI Foundry settings through that environment collection;
+do not ship the bearer key in the executable or source-controlled files.
 
-Unversioned. Returns `200` when every dependency check passes, `503`
-otherwise. Do not depend on the shape of the internal check objects
-inside the report; only the top-level `ready` flag is a stable contract.
+Send `start_run` with the user's message and CATIA context. When the
+response status is `action_required`, execute the explicitly registered
+`open_master_drawing` handler and send an `action_result` message with
+the same `runId` and `actionId`. The worker then returns the terminal
+Agent response. Keep the process alive for the WPF session so pending
+LangGraph state survives between those messages.
 
-### Start a run
-
-```http
-POST /api/v1/agent/runs
-```
-
-### Submit an action result
-
-```http
-POST /api/v1/agent/runs/{runId}/action-results
-```
-
-Both endpoints live under the versioned Agent prefix. When the backend
-introduces `/api/v2`, only `CatiaAgentOptions.ApiPrefix` changes; the
-client code and DTOs stay put.
-
-Use a factory-managed or long-lived `HttpClient`. Do not instantiate a
-new client for each command.
-
-The client should:
-
-- Set BaseAddress from `CatiaAgentOptions`.
-- Prefix every Agent and Tools path with `CatiaAgentOptions.ApiPrefix`.
-- Apply RequestTimeout per HTTP call (default `00:02:30`). It must be
-  longer than the backend's `CATIA_AGENT_REQUEST_TIMEOUT_SECONDS` (120s)
-  so the backend's own timeout fires first and returns a precise
-  `REQUEST_TIMED_OUT` / `MODEL_REQUEST_TIMED_OUT` instead of a client-side
-  `TaskCanceledException`.
-- Do not apply RequestTimeout (or any single `CancellationTokenSource`
-  with a timeout) across the whole `HandleAsync` loop. CATIA execution
-  happens between the two HTTP calls and can take 5+ minutes; it is
-  bounded only by the backend's `CATIA_AGENT_PENDING_RUN_TIMEOUT_SECONDS`
-  (default 1 hour), after which a late result is rejected with 404
-  `AGENT_RUN_NOT_FOUND`. If CATIA operations can exceed an hour, raise
-  that backend setting.
-- Send `X-Request-ID` (Python echoes it if it matches
-  `^[A-Za-z0-9._:-]+$`, otherwise replaces it silently).
-- Use `System.Net.Http.Json` and `System.Text.Json`.
-- Configure `JsonSerializerOptions` with
-  `PropertyNameCaseInsensitive = true` and leave unknown properties
-  unhandled (`JsonUnknownTypeHandling.JsonElement` or simply ignore),
-  so future backend fields do not break the client.
-- Preserve cancellation tokens.
-- Return useful API exceptions with HTTP status, body, and request ID.
+The protocol carries `requestId` for correlation and returns a JSON
+`error` message with `status`, `errorCode`, and `message` for transport
+or request failures. Agent outcomes remain in the response payload and
+use the existing status contract below.
 
 ### Session identifier constraints
 
-`sessionId` on `POST /api/v1/agent/runs` must match
-`^[A-Za-z0-9._:-]+$` and be no longer than 128 characters. A GUID such
-as `Guid.NewGuid().ToString("N")` is safe. Do not include spaces,
-slashes, or unicode letters — the backend rejects them with HTTP 422
-`REQUEST_VALIDATION_FAILED`.
+`sessionId` in a `start_run` payload must match `^[A-Za-z0-9._:-]+$`
+and be no longer than 128 characters. A GUID such as
+`Guid.NewGuid().ToString("N")` is safe. Do not include spaces, slashes,
+or unicode letters.
 
 ### Response status contract
 
-`POST /api/v1/agent/runs` and
-`POST /api/v1/agent/runs/{runId}/action-results` can return any of the
-following `status` values. `AgentResponses.cs` must model all of them:
+The worker's `agent_response` payload can return any of the following
+`status` values. `AgentResponses.cs` must model all of them:
 
 ```text
 action_required          A CATIA action is pending. Dispatch it, then
-                         call the action-results endpoint.
+                         execute the handler, then send `action_result` JSON.
 completed                The dispatched action (or the whole sequence)
                          finished successfully.
 execution_failed         The dispatched action failed. errorCode and
@@ -660,12 +595,12 @@ ask the model to enumerate every step up front; it calls the planner
 again after each successful action within the same `runId` when
 follow-up planning is required. For high-confidence single-action
 requests, Python can finalize immediately after the first successful
-action without that extra follow-up planner call. This means
-the `POST /action-results` response for one action can itself return
-another `action_required` payload with the same `runId` and a new
-`actionId`. `CatiaAgentCommandHandler.HandleAsync` therefore loops on
-`action_required` (capped by `CatiaAgentOptions.MaximumActionsPerRun`,
-default 20) until Python returns a terminal status.
+action. The current worker exposes only one CATIA action and has
+multi-action sequences disabled by default, so .NET normally receives a
+terminal response after its `action_result`. If sequencing is enabled in
+a future release, each result message may return another
+`action_required` with the same `runId` and a new `actionId`; the handler
+should continue until a terminal status.
 
 ### `completedActions` on terminal responses
 
@@ -741,44 +676,8 @@ The dispatcher must use an explicit switch:
 ```csharp
 return action.Name switch
 {
-    "open_cad_document" when toolOptions.OpenCadDocumentEnabled =>
-        await ExecuteOpenCadDocumentAsync(...),
-
-    "get_active_document" when toolOptions.GetActiveDocumentEnabled =>
-        await ExecuteGetActiveDocumentAsync(...),
-
-    "close_cad_document" when toolOptions.CloseCadDocumentEnabled =>
-        await ExecuteCloseCadDocumentAsync(...),
-
-    "create_cad_document" when toolOptions.CreateCadDocumentEnabled =>
-        await ExecuteCreateCadDocumentAsync(...),
-
-    "download_cad" when toolOptions.DownloadCadEnabled =>
-        await ExecuteDownloadCadAsync(...),
-
-    "start_model" when toolOptions.StartModelEnabled =>
-        await ExecuteStartModelAsync(...),
-
     "open_master_drawing" when toolOptions.OpenMasterDrawingEnabled =>
         await ExecuteOpenMasterDrawingAsync(...),
-
-    "open_cad_document" =>
-        ActionExecutionResultRequest.Failed(
-            actionId,
-            "TOOL_DISABLED",
-            "The open_cad_document tool is disabled."),
-
-    "download_cad" =>
-        ActionExecutionResultRequest.Failed(
-            actionId,
-            "TOOL_DISABLED",
-            "The download_cad tool is disabled."),
-
-    "start_model" =>
-        ActionExecutionResultRequest.Failed(
-            actionId,
-            "TOOL_DISABLED",
-            "The start_model tool is disabled."),
 
     "open_master_drawing" =>
         ActionExecutionResultRequest.Failed(
@@ -796,8 +695,9 @@ return action.Name switch
 
 Never use reflection to map a model-generated tool name to a method.
 
-The C# allowlist is independent of MCP. If MCP advertises an unknown
-tool, C# rejects it until the tool is intentionally registered.
+The C# allowlist remains independent of Python. The current worker only
+plans `open_master_drawing`; the dispatcher must reject every other
+executor action until it is intentionally re-enabled end to end.
 
 Orchestrator-only tool calls (`route_to_general_chat`,
 `request_clarification`, `report_unsupported_catia_action`,
@@ -833,8 +733,8 @@ The Python `CatiaContext` model enforces:
 - `openDocuments` is capped at 500 entries and `selectedObjects` at
   1000; keep the provider well under these caps.
 
-Violating these produces HTTP 422 `REQUEST_VALIDATION_FAILED` on
-`POST /api/v1/agent/runs`.
+Violating these produces a `REQUEST_VALIDATION_FAILED` worker error
+before planning begins.
 
 ## 12. CATIA COM object ownership
 
@@ -894,7 +794,11 @@ a close the user is typically about to send another chat command, and
 stealing focus back to CATIA would force them to click the chat window
 again.
 
-## 13. Error codes
+## 13. Legacy FastAPI error codes
+
+The following HTTP error table is retained for the old prototype only.
+The worker's current JSON `error` envelope is defined in
+[WORKER_PROTOCOL.md](WORKER_PROTOCOL.md).
 
 Stable machine-readable error codes emitted by the C# executor:
 
@@ -1037,7 +941,11 @@ ErrorCode
 Avoid logging complete CAD paths or sensitive user commands at normal
 information level.
 
-## 15. Current tool implementations
+## 15. Legacy tool references
+
+Only `open_master_drawing` is enabled in the current worker. The other
+handler descriptions below are retained as historical references and
+must not be registered or advertised until re-enabled end to end.
 
 ### `open_cad_document`
 
@@ -1281,9 +1189,11 @@ include `MASTER_DRAWING_NOT_FOUND`, along with the existing
 `CatiaForegroundHelper.TryBringCatiaToForeground()` after a successful
 open, as `OpenCadDocumentHandler` does.
 
-## 16. Adding a new tool
+## 16. Future tool integration
 
-Every new tool must be implemented on both the Python and .NET sides.
+Any future action must be implemented in the Python worker and .NET
+dispatcher. Add its schema to the in-memory catalog; MCP is optional and
+is not part of the current transport.
 
 ### Step 1: Define argument and result DTOs
 
@@ -1381,12 +1291,12 @@ services.AddSingleton<
     ListOpenDocumentsHandler>();
 ```
 
-### Step 9: Complete the Python changes
+### Step 9: Complete the Python worker changes
 
-The Python MCP definition, Pydantic model, addition to
-`APPROVED_CATIA_TOOL_NAMES` and `create_typed_action`, policy checks,
-and completion-message handling must all exist before the C# tool is
-considered enabled.
+The in-memory catalog definition, Pydantic model, action validation,
+and completion-message handling must exist before the .NET action is
+enabled. Only add MCP registration if MCP is intentionally introduced
+as a future catalog provider.
 
 ### Step 10: Test the complete lifecycle
 
@@ -1394,12 +1304,12 @@ Verify:
 
 ```text
 Natural-language command
-→ Correct MCP tool discovered
+→ Worker selects the in-memory tool
 → Planner model selects correct tool
 → Python validates
 → C# dispatcher accepts
 → CATIA handler executes
-→ Result submitted
+→ Result sent as JSON
 → LangGraph completes
 → WPF displays response
 ```
@@ -1415,7 +1325,10 @@ Also test:
 - FastAPI unavailable
 - `planning_error` fallback (for example, model returns no decision)
 
-## 17. GitHub Copilot-style tool selection
+## 17. Archived multi-tool UI example
+
+The following checkbox list is a future concept only; the current
+worker exposes `open_master_drawing` and no tool-selection UI.
 
 A future WPF tool list can expose checkboxes such as:
 
@@ -1432,10 +1345,10 @@ The checkbox state should update runtime tool policy, ideally through a
 dedicated tool-permission service. C# remains the final authority even
 if Python still advertises a disabled MCP tool.
 
-For a better user experience, later send the enabled tool names to
-FastAPI so the backend filters MCP tools before the planner sees them.
+If multiple actions are later enabled, keep permission enforcement in
+the .NET dispatcher and expose only approved actions to the worker.
 
-## 18. Recommended tool expansion order
+## 18. Future tool expansion order
 
 ### Read-only
 
@@ -1483,74 +1396,37 @@ before these ship.
 ## 19. Design rules
 
 1. Resolve `ChatWindow` and `ChatViewModel` through DI.
-2. Register the CATIA `Application` object once.
-3. Use constructor injection for CATIA handlers.
-4. Reuse `HttpClient` through `IHttpClientFactory`.
-5. Permit only explicitly registered action names.
-6. Validate arguments independently in C#.
-7. Return stable result and error DTOs.
-8. Serialize CATIA actions to prevent concurrent COM modifications.
-9. Keep Chat routing and Agent routing driven purely by the backend
-   `status` field; do not add a local mode flag.
-10. Never execute model-generated C#, VBA, Python, PowerShell, or
-    reflection-based method names.
-11. Route all Agent and Tools traffic through
-    `CatiaAgentOptions.ApiPrefix`; the URL prefix is not hard-coded.
+2. Start one persistent Python worker with redirected standard streams.
+3. Keep stdout exclusively for versioned JSON Lines; drain stderr.
+4. Register the CATIA `Application` object once.
+5. Use constructor injection for CATIA handlers.
+6. Permit only the explicitly registered `open_master_drawing` action.
+7. Validate arguments independently in C#.
+8. Return stable result and error DTOs through `action_result` JSON.
+9. Serialize CATIA COM operations on the CATIA-owned STA thread.
+10. Keep chat routing driven by the returned Agent `status`.
+11. Never execute model-generated code or reflection-based method names.
 
-## 20. End-to-end verification checklist
+## 20. Worker verification checklist
 
-Before validating an Agent command, confirm:
+Before validating a CATIA command, confirm:
 
 ```text
-[ ] The Azure AI Foundry model endpoint (Qwen 3.6 27B) is reachable
-[ ] CatiaAgent:RequestTimeout is greater than the backend's
-    CATIA_AGENT_REQUEST_TIMEOUT_SECONDS and is applied per HTTP call,
-    not across CATIA execution
-[ ] MCP server is running on 127.0.0.1:8001
-[ ] FastAPI is running on 127.0.0.1:8000
-[ ] GET /ready returns 200
-[ ] Required environment variables are set (no appsettings.json today)
-[ ] CatiaAgentOptions.ApiPrefix is set (default /api/v1)
-[ ] CATIA Application COM object is registered
-[ ] ChatWindow is resolved from DI
-[ ] ChatViewModel receives ICatiaAgentCommandHandler
-[ ] Tool is enabled in CatiaAgentTools
-[ ] download_cad tool flag is configured (DownloadCadEnabled)
-[ ] start_model tool flag is configured (StartModelEnabled)
-[ ] Tool handler is registered
-[ ] download_cad handler is registered (IDownloadCadHandler)
-[ ] start_model handler is registered (IStartModelHandler)
-[ ] Dispatcher contains an explicit action branch
-[ ] Dispatcher has an explicit download_cad branch and disabled fallback
-[ ] Dispatcher has an explicit start_model branch and disabled fallback
-[ ] start_model supports SAB/DU via outsystemsId and SEATBELT via partNumber + partRevision
-[ ] open_master_drawing flag (OpenMasterDrawingEnabled), handler
-    (IOpenMasterDrawingHandler), and dispatcher branch with disabled
-    fallback are in place; partRevision may be null
-[ ] Python MCP and Pydantic mappings exist
-[ ] AgentResponses.cs models action_required, completed,
-    execution_failed, non_agentic, clarification_required,
-    unsupported_request, planning_error, invalid_request
-[ ] AgentResponses.cs models completedActions on terminal responses,
-    including arguments on each entry
-[ ] non_agentic response deserializes routeTarget and routeReason
-[ ] unsupported_request response deserializes requestedCapability and
-    reason (including reason = action_limit_reached)
-[ ] planning_error response deserializes errorCode
-[ ] AgentCommandOutcome includes RunStateConflict, PlanningError,
-    NonAgentic, and completedActions surface through
-[ ] ChatViewModel routes non_agentic outcomes to ChatService fallback
-[ ] CatiaAgentCommandHandler returns NonAgentic outcome for
-    non_agentic status
-[ ] CatiaAgentCommandHandler treats planning_error as terminal (no
-    retry, no follow-up call)
-[ ] CatiaAgentCommandHandler loops on action_required until a terminal
-    status
-[ ] CatiaAgentApiException.ErrorCode carries the FastAPI
-    detail.errorCode
-[ ] CatiaAgentApiException surfaces detail.technicalDetail when the
-    backend provides it (dev/test only)
-[ ] JsonSerializerOptions on the client ignore unknown properties
-[ ] Session IDs match ^[A-Za-z0-9._:-]+$ and are <= 128 characters
-[ ] CatiaForegroundHelper is called after successful open/create
+[ ] CatiaAgentWorker.exe is present and starts without a console window
+[ ] The .NET process redirects stdin, stdout, and stderr
+[ ] The first worker output is protocolVersion 1 / type ready
+[ ] The BGE model asset is bundled and loads before ready
+[ ] Azure settings are supplied through the process environment
+[ ] Worker stdout contains only JSON Lines
+[ ] Only open_master_drawing is enabled in the .NET dispatcher
+[ ] CATIA COM is executed only by the C# handler
+[ ] action_result uses the same runId and actionId as action_required
+[ ] Shutdown sends a JSON shutdown message and waits for process exit
 ```
+
+## 21. Legacy HTTP deployment
+
+The former FastAPI/MCP deployment checklist and REST contract are no
+longer applicable to the current worker deployment. See
+[WORKER_PROTOCOL.md](WORKER_PROTOCOL.md) for the active cross-language
+contract.

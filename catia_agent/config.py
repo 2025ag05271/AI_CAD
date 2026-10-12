@@ -54,6 +54,8 @@ class Settings(BaseSettings):
 
     environment: EnvironmentName = "development"
 
+    runtime_mode: Literal["worker", "legacy_api"] = "worker"
+
     # ------------------------------------------------------------------
     # Local FastAPI server
     # ------------------------------------------------------------------
@@ -241,15 +243,11 @@ class Settings(BaseSettings):
     # message is a concrete CATIA action request ("agentic") or a
     # general/informational message that should be routed straight to
     # route_to_general_chat, without spending a model round trip on
-    # that decision (see catia_agent/intent_classifier.py). This uses
-    # a local Ollama embedding model; Ollama is used for nothing else.
+    # that decision (see catia_agent/intent_classifier.py). The BGE
+    # GGUF model is loaded in-process; no Ollama service is required.
     # ------------------------------------------------------------------
 
     enable_embedding_intent_classifier: bool = True
-
-    ollama_base_url: str = (
-        "http://127.0.0.1:11434"
-    )
 
     intent_classifier_timeout_seconds: float = Field(
         default=5.0,
@@ -270,6 +268,11 @@ class Settings(BaseSettings):
         default="qllama/bge-small-en-v1.5",
         min_length=1,
         max_length=200,
+    )
+
+    intent_classifier_gguf_path: str | None = Field(
+        default=None,
+        max_length=2048,
     )
 
     # Top-K exemplar similarities averaged per intent, to reduce
@@ -430,7 +433,6 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "ollama_base_url",
         "mcp_server_url",
     )
     @classmethod
@@ -595,7 +597,10 @@ class Settings(BaseSettings):
     def validate_environment_policy(
         self,
     ) -> Settings:
-        if self.environment == "production":
+        if (
+            self.environment == "production"
+            and self.runtime_mode == "legacy_api"
+        ):
             if self.enable_api_docs:
                 raise ValueError(
                     "API documentation must be disabled in the "

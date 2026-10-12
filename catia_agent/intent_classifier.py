@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
+import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
-from langchain_ollama import OllamaEmbeddings
+from llama_cpp import Llama
 
 from catia_agent.config import settings
 from catia_agent.logging_config import Stopwatch, get_logger, log_event
@@ -21,10 +25,9 @@ logger = get_logger(__name__)
 #
 # Decides whether a user message is a concrete CATIA action request
 # ("agentic") or a general/informational message, using a local Ollama
-# embedding model (qllama/bge-small-en-v1.5 by default) instead of
-# spending a model round trip on that decision. Adapted from
-# tests/bge_embedding_test.py. Local Ollama is used only for these
-# embeddings; the tool-calling model is always Azure AI Foundry.
+# embedding model (qllama/bge-small-en-v1.5) instead of spending a
+# model round trip on that decision. The local GGUF is loaded in-process;
+# the tool-calling model is always Azure AI Foundry.
 # -------------------------------------------------------------------------
 
 AGENTIC_INTENT = "catia_agent_command"
@@ -229,19 +232,106 @@ def _top_k_mean(scores: np.ndarray, k: int) -> float:
     )
 
 
-embeddings = OllamaEmbeddings(
-    model=settings.intent_classifier_model,
-    base_url=settings.ollama_base_url,
-)
+_MODEL_FILENAME = "qllama-bge-small-en-v1.5.gguf"
+_MODEL_LOCK = threading.Lock()
+_embedding_model: Llama | None = None
 
-# Built lazily (not at import time) so importing this module never makes
-# a network call; the first classification call pays the one-time cost
-# of embedding every exemplar phrase.
+
+def _find_ollama_model_file() -> Path | None:
+    model_name, _, model_tag = settings.intent_classifier_model.partition(":")
+    model_tag = model_tag or "latest"
+    models_root = Path(
+        os.environ.get(
+            "OLLAMA_MODELS",
+            str(Path.home() / ".ollama" / "models"),
+        )
+    )
+    manifest_path = (
+        models_root
+        / "manifests"
+        / "registry.ollama.ai"
+        / Path(*model_name.split("/"))
+        / model_tag
+    )
+
+    try:
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    for layer in manifest.get("layers", []):
+        if layer.get("mediaType") != "application/vnd.ollama.image.model":
+            continue
+
+        digest = str(layer.get("digest", ""))
+        if not digest.startswith("sha256:"):
+            continue
+
+        model_path = models_root / "blobs" / digest.replace(":", "-")
+        if model_path.is_file():
+            return model_path
+
+    return None
+
+
+def _resolve_model_path() -> Path:
+    if settings.intent_classifier_gguf_path:
+        configured_path = Path(settings.intent_classifier_gguf_path)
+        if configured_path.is_file():
+            return configured_path
+        raise FileNotFoundError(
+            "The configured intent-classifier GGUF model file was not found."
+        )
+
+    packaged_path = Path(__file__).parent / "assets" / _MODEL_FILENAME
+    if packaged_path.is_file():
+        return packaged_path
+
+    local_ollama_path = _find_ollama_model_file()
+    if local_ollama_path is not None:
+        return local_ollama_path
+
+    raise FileNotFoundError(
+        "The bundled BGE GGUF model is missing. Rebuild the executable "
+        "with the model asset or configure CATIA_AGENT_INTENT_CLASSIFIER_GGUF_PATH."
+    )
+
+
+def _embed_texts_sync(texts: list[str]) -> list[list[float]]:
+    global _embedding_model
+
+    with _MODEL_LOCK:
+        if _embedding_model is None:
+            _embedding_model = Llama(
+                model_path=str(_resolve_model_path()),
+                embedding=True,
+                n_ctx=512,
+                verbose=False,
+            )
+
+        return _embedding_model.embed(
+            texts,
+            normalize=False,
+            truncate=True,
+        )
+
+
+async def _embed_texts(texts: list[str]) -> np.ndarray:
+    vectors = await asyncio.to_thread(
+        _embed_texts_sync,
+        texts,
+    )
+    return np.asarray(vectors, dtype=np.float32)
+
+# Built lazily (not at import time); the first classification call pays
+# the one-time cost of loading the local GGUF and embedding exemplars.
 _intent_matrices: dict[str, np.ndarray] | None = None
 _intent_matrices_lock = asyncio.Lock()
 
 # Monotonic deadline before which the classifier is skipped after a
-# failure, so an unavailable Ollama doesn't cost every request a timeout.
+# failure, so a broken local model doesn't cost every request a timeout.
 _classifier_unavailable_until: float = 0.0
 
 
@@ -262,10 +352,8 @@ async def _get_intent_matrices() -> dict[str, np.ndarray]:
             normalized_phrases = [
                 _strip_file_paths(phrase) for phrase in phrases
             ]
-            vectors = await embeddings.aembed_documents(
-                normalized_phrases
-            )
-            matrices[intent] = _normalize(np.asarray(vectors))
+            vectors = await _embed_texts(normalized_phrases)
+            matrices[intent] = _normalize(vectors)
 
         log_event(
             logger,
@@ -281,14 +369,21 @@ async def _get_intent_matrices() -> dict[str, np.ndarray]:
         return matrices
 
 
+async def warmup_intent_classifier() -> None:
+    """Load the bundled model and exemplar vectors before worker readiness."""
+
+    if settings.enable_embedding_intent_classifier:
+        await _get_intent_matrices()
+
+
 async def classify_request_intent(
     user_message: str,
 ) -> tuple[str, dict[str, float]] | None:
     """
     Classify a message as AGENTIC_INTENT or NON_AGENTIC_INTENT.
 
-    Returns None if the local Ollama embedding call failed, timed out,
-    or is in its post-failure cooldown, so callers can fall back to
+    Returns None if the local embedding call failed, timed out, or is
+    in its post-failure cooldown, so callers can fall back to
     letting the model decide instead of failing the request.
     """
 
@@ -310,12 +405,10 @@ async def classify_request_intent(
         ):
             matrices = await _get_intent_matrices()
             query_vector = _normalize(
-                np.asarray(
-                    await embeddings.aembed_query(
-                        _strip_file_paths(user_message)
-                    )
+                await _embed_texts(
+                    [_strip_file_paths(user_message)]
                 )
-            )
+            )[0]
 
     except Exception as exc:
         _classifier_unavailable_until = (

@@ -15,8 +15,8 @@ from catia_mcp.server import SharedSecretTokenVerifier
 
 
 def _tool(
-    name: str = "open_cad_document",
-    description: str = "Prepare an action to open a CATIA document.",
+    name: str = "open_master_drawing",
+    description: str = "Prepare an action to open a master drawing.",
     properties: dict | None = None,
 ) -> dict:
     return {
@@ -29,7 +29,10 @@ def _tool(
                 "properties": (
                     properties
                     if properties is not None
-                    else {"filePath": {"type": "string"}}
+                    else {
+                        "partNumber": {"type": "string"},
+                        "partRevision": {"type": ["string", "null"]},
+                    }
                 ),
                 "required": [],
                 "additionalProperties": False,
@@ -80,7 +83,7 @@ def test_unapproved_tool_is_dropped() -> None:
     )
 
     assert [t["function"]["name"] for t in accepted] == [
-        "open_cad_document"
+        "open_master_drawing"
     ]
 
 
@@ -148,7 +151,7 @@ def test_too_many_tools_rejects_whole_catalog(
 
 def test_enforce_keeps_pinned_tool(enforce_pinning) -> None:
     tool = _tool()
-    manifest = {"open_cad_document": compute_tool_fingerprint(tool)}
+    manifest = {"open_master_drawing": compute_tool_fingerprint(tool)}
 
     assert apply_tool_guardrails([tool], manifest=manifest) == [tool]
 
@@ -198,7 +201,7 @@ def test_manifest_round_trip(tmp_path) -> None:
 
     assert json.loads(path.read_text())["version"] == 1
     assert load_tool_manifest(path) == {
-        "open_cad_document": compute_tool_fingerprint(tool)
+        "open_master_drawing": compute_tool_fingerprint(tool)
     }
 
 

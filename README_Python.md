@@ -1,115 +1,95 @@
-# CATIA Agent Backend
+# CATIA Agent Python Worker
 
-## Python, FastAPI, LangGraph, MCP, and Model-Provider Architecture Guide
+## Python, LangGraph, JSON IPC, and Model-Provider Architecture Guide
 
 ## 1. Purpose
 
-This document describes the Python side of the CATIA Agent. The backend
-receives a natural-language CATIA command, discovers approved tools from an
-MCP server, asks a tool-calling model to select a tool, validates the
-proposed action through several deterministic layers, pauses the LangGraph
-workflow while an external C# executor performs the CATIA operation, and
-then resumes the workflow with the execution result.
+The current deployment packages the Python agent as a Windows executable
+launched by the WPF/.NET client. The long-running worker exchanges
+versioned JSON Lines over redirected standard input and output. It uses
+LangGraph to route each message, selects from an in-memory catalog with
+one enabled CATIA action (`open_master_drawing`), validates the action,
+and pauses while .NET performs the CATIA operation. .NET then returns the
+result as JSON and the graph resumes.
 
-The Python backend does not execute CATIA COM automation. CATIA operations
-remain in the external .NET application.
+Python does not execute CATIA COM automation. The .NET action dispatcher
+remains the only CATIA executor.
 
 The tool-calling model is Qwen 3.6 27B hosted on Azure AI Foundry,
 reached over an OpenAI-compatible chat-completions endpoint with
 bearer-token authentication. It sits behind a provider-neutral
 `ToolCallingModelClient` protocol (see `catia_agent/model_providers.py`),
-so a future provider change would not touch the graph, MCP catalog, API
-contracts, or validation policy. Ollama is no longer used for chat; a
-local Ollama install is used only for the embedding-based ask-vs-agent
-classifier (Section 8.1). See Sections 4 and 9.
+so a future provider change does not touch the graph, tool catalog,
+worker protocol, or validation policy. The exact qllama BGE-small GGUF is
+loaded in-process through `llama-cpp-python` and bundled into the worker
+executable. The Ollama service is not required. See Sections 4 and 8.1.
 
 ## 2. High-level architecture
 
 ```text
 WPF / .NET client
-    |
-    | REST request
-    v
-FastAPI Agent API :8000
-    |
-    v
-LangGraph workflow
-    |
-    +--> MCP client --> CATIA MCP server :8001
-    |                       |
-    |                       +--> Tool names
-    |                       +--> Descriptions
-    |                       +--> JSON input schemas
-    |
-    +--> Embedding classifier --> local Ollama :11434 (bge-small, embeddings only)
-    |
-    +--> ToolCallingModelClient --> Azure AI Foundry --> Qwen 3.6 27B
-    |                                                    |
-    |                                                    +--> Native tool call
-    |
-    +--> Pydantic and policy validation
-    |
-    v
-action_required response
-    |
-    | External C# execution result
-    v
-LangGraph resumes
-    |
-    v
-completed or execution_failed response
+  |
+  | launch persistent worker; JSON Lines over redirected stdin/stdout
+  v
+CatiaAgentWorker.exe
+  |
+  +--> BGE-small GGUF loaded in-process
+  +--> LangGraph planner --> Azure AI Foundry / Qwen 3.6 27B
+  +--> In-memory tool catalog: open_master_drawing only
+  +--> Pydantic and deterministic policy validation
+  |
+  v
+action_required JSON response
+  |
+  | .NET dispatches action and executes CATIA COM
+  v
+action_result JSON request
+  |
+  v
+LangGraph resumes --> terminal JSON response
 ```
 
 ### Responsibilities
 
-- **FastAPI** exposes the REST API, versioned under `/api/v1`, plus health,
-  readiness, tool diagnostics, an OpenAPI schema, and Swagger UI.
+- **The Python worker** owns one long-lived LangGraph process and a
+  newline-delimited JSON protocol. It does not open a local HTTP listener.
 - **LangGraph** manages state, routing, interruption, resumption, and
   completion of Agent runs.
-- **MCP server** is the authoritative catalog of approved CATIA executor
-  tool names, descriptions, and argument schemas.
+- **The in-memory catalog** exposes only `open_master_drawing`. The
+  catalog boundary is the extension point for a future MCP provider; MCP
+  is not started or contacted in this deployment.
 - **ToolCallingModelClient** is a provider-neutral interface, currently
   implemented only by `AzureFoundryToolCallingModelClient` (Qwen 3.6 27B
   on Azure AI Foundry).
-- **Ollama** (local) serves only the bge-small embedding model used by
-  the ask-vs-agent classifier. It is optional: if it is down, the
-  classifier is skipped and the model decides.
-- **Pydantic** validates API payloads, orchestrator and executor tool
+- **The bundled GGUF model** classifies ask-vs-agent intent in-process;
+  no Ollama service is required.
+- **Pydantic** validates worker payloads, orchestrator and executor tool
   calls, CATIA context, and external execution results.
 - **The .NET client** remains the final executor and calls the CATIA COM
   API.
 
 ## 3. Local services and ports
 
-```text
-FastAPI Agent API    http://127.0.0.1:8000
-CATIA MCP server     http://127.0.0.1:8001/mcp
-Ollama API           http://127.0.0.1:11434 (embeddings only)
-FastAPI Swagger      http://127.0.0.1:8000/docs
-FastAPI OpenAPI      http://127.0.0.1:8000/openapi.json
-```
+The worker opens no local TCP port. Its only local communication channel
+is redirected standard input/output managed by the .NET parent process.
+Azure AI Foundry remains a remote HTTPS dependency for tool selection.
 
-The tool-calling model endpoint is the configured
-`CATIA_AGENT_AZURE_FOUNDRY_ENDPOINT`; there is no local port for it.
-
-All development services are bound to loopback addresses. In production
-`enable_api_docs` is disabled by policy (see Section 6), and `/docs`,
-`/redoc`, and `/openapi.json` are not served.
+The old FastAPI and MCP modules remain in the source tree for the legacy
+prototype and tests, but the packaged worker does not import or launch
+them. `run_api.py` now starts the JSON worker rather than Uvicorn.
 
 ## 4. Technology stack
 
 - Python 3.11
-- FastAPI
-- Uvicorn
 - LangGraph
 - Pydantic 2
 - Pydantic Settings
-- FastMCP
 - httpx (Azure AI Foundry HTTP client)
 - truststore (uses the OS certificate store for TLS verification, required behind TLS-inspecting corporate proxies)
 - Qwen 3.6 27B on Azure AI Foundry (tool-calling model)
-- langchain-ollama + NumPy (embedding-based ask-vs-agent intent classifier, Section 8.1)
-- qllama/bge-small-en-v1.5 pulled in local Ollama (embedding model only)
+- llama-cpp-python (in-process GGUF inference)
+- NumPy (embedding classifier)
+- PyInstaller (build-only; packages the worker and GGUF asset)
 
 Environment setup used for development:
 
@@ -121,22 +101,21 @@ conda activate catia-agent
 Typical dependencies:
 
 ```powershell
-python -m pip install pydantic pydantic-settings
-python -m pip install fastapi "uvicorn[standard]" langgraph
-python -m pip install "fastmcp>=3.4,<4"
-python -m pip install httpx
-python -m pip install truststore
-python -m pip install langchain-ollama numpy
+python -m pip install -r requirements-worker.txt
 ```
 
-Pull the embedding model used by the ask-vs-agent classifier (Section
-8.1) in your local Ollama install:
+Build the executable and bundle the exact GGUF model from the local
+Ollama model cache:
 
 ```powershell
-ollama pull qllama/bge-small-en-v1.5
+.
+\build_worker.ps1
 ```
 
-spaCy is no longer a dependency (see Section 8.2).
+The build verifies the model SHA-256 and includes it in
+`dist/CatiaAgentWorker.exe`. Runtime does not require Ollama. For a
+source run, `CATIA_AGENT_INTENT_CLASSIFIER_GGUF_PATH` can point to the
+GGUF file.
 
 ## 5. Project structure
 
@@ -150,7 +129,12 @@ catia-agent-poc/
 |-- pytest.ini
 |-- README_.NET.md
 |-- README_Python.md
-|-- run_api.py
+|-- WORKER_PROTOCOL.md
+|-- worker.py
+|-- run_api.py                 # compatibility launcher for worker.py
+|-- build_worker.ps1
+|-- catia_agent_worker.spec
+|-- scripts/prepare_worker_model.py
 |-- show_graph.py
 |
 |-- catia_agent/
@@ -164,6 +148,7 @@ catia-agent-poc/
 |   |-- graph_session.py
 |   |-- graph_state.py
 |   |-- graph_terminal.py
+|   |-- tool_catalog.py        # in-memory open_master_drawing tool only
 |   |-- logging_config.py
 |   |-- mcp_tools.py
 |   |-- model_providers.py
@@ -189,14 +174,14 @@ catia-agent-poc/
 ```
 
 Automated tests live under `tests/` and are run with `pytest` (configured
-by `pytest.ini`). Tests marked `integration` require a local Ollama
-(embeddings), the Azure AI Foundry endpoint, and the CATIA MCP server;
-the rest run without them. `show_graph.py` remains useful
-for visualizing the compiled LangGraph, and Swagger and Postman are the
-recommended way to exercise the API end-to-end.
+by `pytest.ini`). Unit tests do not require local services. Live planner
+tests require Azure AI Foundry. The packaged worker does not require
+FastAPI, MCP, or Ollama. `show_graph.py` remains useful for visualizing
+the compiled LangGraph.
 
-The previous hard-coded tool registry has been removed. MCP is the sole
-source of executor tool definitions.
+The current in-memory catalog exposes only `open_master_drawing`. MCP is
+not queried or started by the worker; the retained API/MCP modules are
+legacy prototype code and are not included in the executable.
 
 ## 6. Configuration
 
@@ -206,23 +191,18 @@ All settings use the `CATIA_AGENT_` prefix and are loaded once by
 `pydantic-settings` (see `catia_agent/config.py`). A local `.env` file is
 supported for development.
 
+The worker uses the Azure provider, GGUF classifier, logging, and graph
+settings shown below. FastAPI/MCP endpoint and admin settings belong only
+to the explicitly selected `legacy_api` runtime and are not required by
+the packaged worker.
+
 Representative `.env` (see `.env.example` for the full list):
 
 ```dotenv
-CATIA_AGENT_APP_NAME=CATIA Agent API
+CATIA_AGENT_APP_NAME=CATIA Agent Worker
 CATIA_AGENT_APP_VERSION=1.0.0
 CATIA_AGENT_ENVIRONMENT=development
-
-CATIA_AGENT_API_HOST=127.0.0.1
-CATIA_AGENT_API_PORT=8000
-CATIA_AGENT_API_PREFIX=/api/v1
-CATIA_AGENT_ENABLE_API_DOCS=true
-CATIA_AGENT_REQUEST_TIMEOUT_SECONDS=120
-CATIA_AGENT_REQUEST_BODY_MAX_BYTES=1048576
-
-CATIA_AGENT_MAX_USER_MESSAGE_CHARACTERS=10000
-CATIA_AGENT_MAX_SESSION_ID_CHARACTERS=128
-CATIA_AGENT_MAX_REQUEST_ID_CHARACTERS=128
+CATIA_AGENT_RUNTIME_MODE=worker
 
 CATIA_AGENT_MODEL_TEMPERATURE=0
 
@@ -234,14 +214,9 @@ CATIA_AGENT_AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS=45
 CATIA_AGENT_AZURE_FOUNDRY_MAX_TOKENS=2048
 CATIA_AGENT_AZURE_FOUNDRY_ENABLE_THINKING=false
 
-CATIA_AGENT_MCP_SERVER_URL=http://127.0.0.1:8001/mcp
-CATIA_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=15
-CATIA_AGENT_MCP_TOOL_CACHE_TTL_SECONDS=60
-CATIA_AGENT_READINESS_FORCE_MCP_REFRESH=false
-
 CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=true
-CATIA_AGENT_OLLAMA_BASE_URL=http://127.0.0.1:11434
 CATIA_AGENT_INTENT_CLASSIFIER_MODEL=qllama/bge-small-en-v1.5
+CATIA_AGENT_INTENT_CLASSIFIER_GGUF_PATH=
 CATIA_AGENT_INTENT_CLASSIFIER_TIMEOUT_SECONDS=5
 CATIA_AGENT_INTENT_CLASSIFIER_FAILURE_COOLDOWN_SECONDS=30
 CATIA_AGENT_INTENT_CLASSIFIER_TOP_K=3
@@ -259,9 +234,6 @@ CATIA_AGENT_LOG_LEVEL=INFO
 CATIA_AGENT_ENABLE_JSON_LOGS=true
 CATIA_AGENT_INCLUDE_TECHNICAL_DETAILS_IN_ERRORS=false
 
-CATIA_AGENT_ENABLE_TOOL_CATALOG_ENDPOINT=true
-CATIA_AGENT_ENABLE_TOOL_CACHE_CLEAR_ENDPOINT=true
-CATIA_AGENT_ADMIN_API_KEY=
 ```
 
 ### Configuration principles
@@ -282,33 +254,30 @@ CATIA_AGENT_ADMIN_API_KEY=
   `CATIA_AGENT_ENABLE_MULTI_ACTION_SEQUENCES` (default `false`) are
   independent switches described in Section 8.2.
 
-### Timeout hierarchy
+### Worker timeouts
 
-CATIA execution never happens inside an HTTP request to this backend:
-`POST /agent/runs` returns `action_required` as soon as an action is
-planned, .NET executes it (however long it takes), then calls
-`POST .../action-results`. Two separate budgets therefore apply:
+The worker has no HTTP request timeout. It processes one JSON message at
+a time and remains alive while .NET executes CATIA. The relevant budgets
+are:
 
 | Setting | Default | Bounds |
 | --- | --- | --- |
 | `INTENT_CLASSIFIER_TIMEOUT_SECONDS` | 5 | Local embedding call |
-| `MCP_REQUEST_TIMEOUT_SECONDS` | 15 | MCP tool discovery |
-| `AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS` | 45 | One model call (up to 2 per request with the duplicate-action retry) |
-| `REQUEST_TIMEOUT_SECONDS` | 120 | Whole HTTP request (planning only) |
-| .NET `CatiaAgent:RequestTimeout` | 00:02:30 | .NET `HttpClient` call to FastAPI |
+| `AZURE_FOUNDRY_REQUEST_TIMEOUT_SECONDS` | 45 | One model call |
 | `PENDING_RUN_TIMEOUT_SECONDS` | 3600 | Time a run may wait for .NET to report a CATIA result |
 
-Each layer must be strictly longer than the layer inside it, so the
-inner timeout always fires first and produces a precise error code.
-`Settings.validate_timeout_hierarchy` refuses to start if
-`REQUEST_TIMEOUT_SECONDS` is not greater than
-`classifier + MCP + 2 x model`. Raise `PENDING_RUN_TIMEOUT_SECONDS` (not
-the HTTP timeouts) if a CATIA operation can run longer than an hour.
+The worker warms the local GGUF model before it emits `ready`. Raise
+`PENDING_RUN_TIMEOUT_SECONDS` if CATIA operations can take longer than
+an hour. The JSON protocol and process lifecycle are documented in
+[WORKER_PROTOCOL.md](WORKER_PROTOCOL.md).
 
 ### Environment policy
 
-`Settings.validate_environment_policy` enforces production-safe defaults.
-When `CATIA_AGENT_ENVIRONMENT=production`:
+`Settings.validate_environment_policy` enforces production-safe defaults
+for the retained `legacy_api` runtime. The current `worker` runtime does
+not host API docs or MCP endpoints and skips those server-only checks.
+When `CATIA_AGENT_RUNTIME_MODE=legacy_api` and
+`CATIA_AGENT_ENVIRONMENT=production`:
 
 - `CATIA_AGENT_ENABLE_API_DOCS` must be `false`.
 - `CATIA_AGENT_INCLUDE_TECHNICAL_DETAILS_IN_ERRORS` must be `false`
@@ -320,13 +289,17 @@ The application fails to start if any of these are violated.
 
 ### Administrative authorization
 
-The `POST /api/v1/tools/cache/clear` endpoint is protected by an
+The legacy `POST /api/v1/tools/cache/clear` endpoint is protected by an
 `X-Admin-API-Key` header when `CATIA_AGENT_ADMIN_API_KEY` is configured.
 The check uses a constant-time comparison. When the key is empty (local
 development only), the endpoint is unauthenticated so Postman and Swagger
 can exercise it. In production the key is mandatory (see above).
 
-## 7. Core API endpoints
+## 7. Legacy FastAPI HTTP contract (not used by the worker)
+
+The following API material documents the retained prototype and its
+tests. The WPF client must use the JSON worker protocol instead; it must
+not call these HTTP endpoints.
 
 All Agent and tool endpoints are versioned under `CATIA_AGENT_API_PREFIX`
 (`/api/v1` by default). Health endpoints are unversioned.
@@ -684,9 +657,9 @@ That ask-vs-agent decision is made in two stages:
 
 1. **Embedding classifier (primary, default on).** Before the first
    planner call of a run, `is_agentic_request` (see
-   `catia_agent/intent_classifier.py`) embeds the user message with a
-   local Ollama model (`CATIA_AGENT_INTENT_CLASSIFIER_MODEL`, default
-   `qllama/bge-small-en-v1.5`) and compares it against two curated sets
+  `catia_agent/intent_classifier.py`) embeds the user message with the
+  bundled qllama BGE-small GGUF through `llama-cpp-python` and compares
+  it against two curated sets
    of exemplar phrases — concrete CATIA action requests vs. general or
    informational messages — using cosine similarity. If the message
    scores confidently as a CATIA action request
@@ -696,9 +669,8 @@ That ask-vs-agent decision is made in two stages:
    confidently scores as general/informational, `plan_action_node`
    returns a `non_agentic` result immediately and **the model is never
    called for that turn** — this is a full Azure Foundry chat
-   round trip saved per non-agentic message. This step uses a local
-   Ollama install with the embedding model pulled; Ollama is used for
-   nothing else.
+  round trip saved per non-agentic message. Embeddings run in-process;
+  no local Ollama service is contacted.
 
    Long, unusual absolute file paths (real CATIA files can live many
    folders deep, for example under a synced OneDrive tree) dilute the
@@ -715,13 +687,13 @@ That ask-vs-agent decision is made in two stages:
 2. **Model tool selection (fallback and safety net).** If the
    embedding classifier is disabled
    (`CATIA_AGENT_ENABLE_EMBEDDING_INTENT_CLASSIFIER=false`), if it is
-   uncertain (score below the threshold/margin), or if the local
-   Ollama embedding call fails or exceeds
+  uncertain (score below the threshold/margin), or if the local
+  embedding call fails or exceeds
    `CATIA_AGENT_INTENT_CLASSIFIER_TIMEOUT_SECONDS` (default 5s), the
    run falls back to letting the model make the routing decision
    through a tool call. After a failure the classifier is skipped for
    `CATIA_AGENT_INTENT_CLASSIFIER_FAILURE_COOLDOWN_SECONDS` (default
-   30s), so an Ollama outage doesn't add latency to every request.
+  30s), so a local model failure doesn't add latency to every request.
 
 - If the model selects a CATIA MCP tool, the request is agentic. It
   proceeds through `prepare_action` → `await_action_result` →
@@ -1154,11 +1126,17 @@ The model selects a tool. It never executes it. The application validates
 the tool call and, for CATIA executor tools, returns it to the .NET
 executor.
 
-## 10. MCP architecture
+## 10. MCP architecture (disabled)
 
-### MCP role
+The current worker does not connect to or start an MCP server. Only
+`open_master_drawing` is registered in the in-memory catalog at
+`catia_agent/tool_catalog.py`. The MCP source is retained as a future
+integration option; all other CATIA tool registrations are disabled and
+`python -m catia_mcp.server` does not start a listener.
 
-The MCP server is the authoritative source for:
+### Future MCP role
+
+If MCP is reintroduced, it can provide the authoritative source for:
 
 - Executor tool names
 - Tool descriptions
@@ -1166,30 +1144,19 @@ The MCP server is the authoritative source for:
 - Tool-level argument validation
 - Tool discovery
 
-The MCP server does not call CATIA. It prepares typed action data for
-the external WPF and C# executor.
+The MCP server must not call CATIA. It should prepare typed action data
+for the external WPF and C# executor.
 
-### Currently published MCP tools
+### Current worker tool
 
 ```text
-open_cad_document       Prepare opening a CATPart, CATProduct, or CATDrawing
-                        by absolute Windows path.
-close_cad_document      Prepare closing the active, a named, or all open
-                        documents. targetMode is required.
-create_cad_document     Prepare creating a new, unsaved CATPart, CATProduct,
-                        or CATDrawing document. No file path; saving is a
-                        separate action.
-download_cad            Prepare downloading a CAD document from PLM/Enovia.
-                        Accepts either (partNumber + partRevision) or
-                        partTitle, with optional documentType and savePath.
-start_model             Prepare launching an approved CATIA start model.
-                        Requires modelType and family-specific identifiers.
-                        SAB/DU require outsystemsId + afisNumber;
-                        customName is optional for SAB/DU.
-                        SEATBELT requires partNumber + partRevision.
 open_master_drawing     Prepare opening the master drawing of a part.
                         partNumber is required; partRevision is optional.
 ```
+
+The remaining tool descriptions and MCP implementation notes in this
+section document retired prototype capabilities and are not exposed by
+the worker.
 
 `download_cad` is the single approved tool for user intents such as
 "download from PLM", "get from Enovia", "fetch CAD", or "retrieve from
@@ -1460,13 +1427,12 @@ Examples of deterministic Python validation:
 The application emits structured JSON logs when
 `CATIA_AGENT_ENABLE_JSON_LOGS=true` (see `catia_agent/logging_config.py`).
 
-Every log line goes to the console and, when
+Every worker log is written to standard error and, when
 `CATIA_AGENT_ENABLE_FILE_LOGGING=true` (default), to a daily file in
 `CATIA_AGENT_LOG_DIRECTORY` (default `C:\Temp\AI_Logs`, created if
-missing): `CatiaAgentApi_YYYYMMDD.log` for FastAPI and
-`CatiaAgentMcp_YYYYMMDD.log` for the MCP server. Files older than
-`CATIA_AGENT_LOG_FILE_RETENTION_DAYS` are deleted. Uvicorn's own logs are
-routed into the same file. Tests disable file logging (`tests/conftest.py`).
+missing): `CatiaAgentWorker_YYYYMMDD.log`. Files older than
+`CATIA_AGENT_LOG_FILE_RETENTION_DAYS` are deleted. Tests disable file
+logging (`tests/conftest.py`).
 
 New logging code should use the shared helpers in
 `catia_agent/logging_config.py` so the log shape can be changed in one
@@ -1567,37 +1533,29 @@ being serialized to log records. Do not log full prompts, model
 reasoning, CAD contents, or absolute file paths at normal information
 level.
 
-## 14. Starting the services
+## 14. Building and launching the worker
 
-### Terminal 1: MCP server
-
-```powershell
-conda activate catia-agent
-python -m catia_mcp.server
-```
-
-### Terminal 2: FastAPI
+Build on Windows with Python 3.11 and the worker requirements installed:
 
 ```powershell
 conda activate catia-agent
-python run_api.py
+.\build_worker.ps1
 ```
 
-Ollama normally runs as a native Windows background application and is
-only needed for the embedding classifier.
-
-Before exercising the Agent, verify:
-
-```text
-GET http://127.0.0.1:8000/health
-GET http://127.0.0.1:8000/ready
-GET http://127.0.0.1:8000/api/v1/tools
-```
-
-Use Postman for manual API testing. Swagger is at `/docs` and OpenAPI at
-`/openapi.json` when `enable_api_docs` is enabled.
+The script copies the exact GGUF from the local Ollama model cache,
+verifies its pinned SHA-256, and produces `dist/CatiaAgentWorker.exe`.
+The executable does not start FastAPI, MCP, or Ollama. The WPF process
+starts it with redirected standard input/output and follows
+[WORKER_PROTOCOL.md](WORKER_PROTOCOL.md). `python worker.py` can be used
+for source-level development with the same protocol.
 
 ## 15. Adding a new CATIA tool
+
+The current worker supports only `open_master_drawing`. The steps below
+describe the future MCP-backed extension path; they do not enable a tool
+in the worker by themselves. A worker tool must also be added to the
+in-memory catalog, typed Python policy, .NET dispatcher, protocol tests,
+and the .NET result contract.
 
 Use the following sequence for every new executor tool.
 
@@ -1680,7 +1638,7 @@ For tools with arguments, validate at least:
 In `_build_action_success_message` inside `catia_agent/graph.py`,
 translate the external result into a concise user-facing sentence.
 
-### Step 6: Pin, restart MCP and refresh tools
+### Step 6: Pin and refresh tools (future MCP provider only)
 
 ```powershell
 python -m catia_agent.mcp_guardrails pin
@@ -1709,7 +1667,10 @@ Add unit tests under `tests/` covering:
 
 The C# steps are documented in the companion .NET guide.
 
-## 16. Recommended tool expansion order
+## 16. Future tool expansion roadmap (disabled)
+
+None of the following capabilities are currently exposed by the worker.
+The only enabled CATIA executor action is `open_master_drawing`.
 
 Start with read-only tools:
 
@@ -1778,18 +1739,15 @@ not because of prompt length or tool count alone.
 
 ## 17. Production considerations
 
-The Python backend already ships with several production-oriented
-guardrails:
+The worker retains several production-oriented guardrails:
 
-- Environment-policy enforcement in `Settings.validate_environment_policy`
-  (docs disabled, technical detail hidden, admin key required for the
-  cache-clear endpoint when enabled).
-- Stable error contract with correlation IDs on every response.
-- Per-request timeouts, body-size limits, identifier validation, and a
-  provider-neutral model-client abstraction.
+- Versioned JSON Lines messages with request IDs and a 1 MiB input limit.
+- Typed Pydantic contracts, identifier validation, and a provider-neutral
+  model-client abstraction.
 - Structured JSON logging with automatic redaction of sensitive field
   names.
-- Deterministic validation layers between the model and the C# executor.
+- One-tool in-memory catalog, deterministic Python validation, and the
+  independent .NET dispatcher allowlist.
 
 The following items must still be addressed before broad production
 rollout:
@@ -1799,39 +1757,41 @@ rollout:
   `runId -> sessionId` map on restart. This is the largest remaining gap.
 - **Persistent `runId -> sessionId` mapping** consistent with the chosen
   checkpoint store.
-- **Authentication between .NET and FastAPI** on the Agent endpoints
-  (the admin key today only protects the cache-clear endpoint).
-- **MCP transport hardening beyond the shared secret** (for example,
-  stdio or in-process transport, or short-lived tokens).
+- **Worker process recovery.** Pending LangGraph state is in-memory and
+  is lost if the worker exits; the .NET host must not replay an action
+  whose completion is unknown.
+- **Process launch security.** Restrict executable/configuration ACLs,
+  protect Azure credentials in the host environment, and validate the
+  worker binary before deployment.
 - **Tool-level authorization** for modifying operations.
 - **Approved-directory allowlists** enforced in Python in addition to C#.
 - **Human approval for modifying or persistent actions** (see Section 16).
-- **Rate limits and concurrency limits** at the ingress layer.
+- **Rate limits and concurrency limits** in the WPF host/worker protocol.
 - **Audit retention** for `completedActions` and terminal responses.
 - **A model and tool evaluation dataset** exercised on every model or
   prompt change.
-- **Versioned API contracts** (the current prefix is `/api/v1`; add
-  `/api/v2` when a breaking change is required rather than mutating v1).
-- **Recovery-after-restart procedures** aligned with the persistent
-  checkpoint store.
-- **Installer and service lifecycle management** for MCP, FastAPI, and
-  the chosen model provider.
+- **Protocol versioning and compatibility tests** before changing the
+  JSON worker messages.
+- **Recovery-after-restart procedures** aligned with persistent
+  checkpointing if runs must survive worker restarts.
+- **Installer and worker lifecycle management** for the executable and
+  bundled model.
 - **Corporate data and model-governance sign-off**, especially before
   switching to a cloud-hosted model.
 
 ## 18. Design rules
 
-1. The model selects tools but never executes CATIA.
-2. MCP advertises tools but does not automatically authorize execution.
+1. The model selects actions but never executes CATIA.
+2. The in-memory catalog exposes only `open_master_drawing`.
 3. Python validates every selected action.
-4. C# independently validates and allowlists every action.
+4. C# independently validates and allowlists the action.
 5. CATIA COM logic remains deterministic and testable.
-6. The model chooses chat vs agentic routing by calling exactly one
-   orchestrator or executor tool; the client never picks a mode.
+6. The model chooses chat vs agentic routing; the client never picks a
+  mode.
 7. The model must not generate Python, C#, VBA, or PowerShell for
    immediate execution.
 8. New tools are disabled until all Python and C# integration steps are
    complete.
 9. The planner is coupled to `ToolCallingModelClient`, not to any
-   specific provider. Provider changes must not leak into the graph, the
-   MCP layer, or the API contracts.
+  specific provider. Provider changes must not leak into the graph,
+  worker protocol, or CATIA executor contract.

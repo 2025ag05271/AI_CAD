@@ -223,7 +223,9 @@ def create_executor_action(
 # CATIA document tools
 # -------------------------------------------------------------------------
 
-@mcp.tool
+# Disabled in the JSON worker deployment. Re-enable only after MCP is
+# intentionally added back as a catalog provider.
+# @mcp.tool
 def open_cad_document(
     filePath: str,
 ) -> dict[str, Any]:
@@ -279,7 +281,7 @@ def get_active_document() -> dict[str, Any]:
     )
 
 
-@mcp.tool
+# @mcp.tool
 def create_cad_document(
     documentType: DocumentType,
 ) -> dict[str, Any]:
@@ -310,7 +312,7 @@ def create_cad_document(
     )
 
 
-@mcp.tool
+# @mcp.tool
 def close_cad_document(
     targetMode: CloseTargetMode,
     documentName: str | None = None,
@@ -369,7 +371,7 @@ def close_cad_document(
     )
 
 
-@mcp.tool
+# @mcp.tool
 def download_cad(
     partNumber: str | None = None,
     partRevision: str | None = None,
@@ -483,7 +485,7 @@ def download_cad(
     )
 
 
-@mcp.tool
+# @mcp.tool
 def start_model(
     *,
     modelType: str,
@@ -611,23 +613,10 @@ def open_master_drawing(
 
 def run_server() -> None:
     """
-    Run the local CATIA MCP HTTP server.
+    MCP hosting is disabled for the JSON worker deployment.
     """
-
-    setup_logging(log_file_prefix="CatiaAgentMcp")
-
-    log_event(
-        logger,
-        "mcp_server_starting",
-        host="127.0.0.1",
-        port=8001,
-        authenticationEnabled=settings.mcp_api_key is not None,
-    )
-
-    mcp.run(
-        transport="http",
-        host="127.0.0.1",
-        port=8001,
+    raise RuntimeError(
+        "The MCP server is disabled. The Agent uses an in-memory tool catalog."
     )
 
 

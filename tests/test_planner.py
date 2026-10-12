@@ -25,6 +25,7 @@ from catia_agent.planner import (
     validate_close_cad_document,
     validate_open_cad_document,
 )
+from catia_agent.tool_catalog import get_model_tools
 
 
 # ---------------------------------------------------------
@@ -307,8 +308,16 @@ def test_build_catia_context_message_lists_open_documents() -> None:
 
 
 # ---------------------------------------------------------
-# plan_catia_action orchestration (mocked Ollama + MCP)
+# plan_catia_action orchestration (mocked model + tool catalog)
 # ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_production_tool_catalog_contains_only_master_drawing() -> None:
+    tools = await get_model_tools()
+
+    assert [tool["function"]["name"] for tool in tools] == [
+        "open_master_drawing"
+    ]
 
 def _tool_call(name: str, arguments: dict) -> dict:
     return {
@@ -334,7 +343,7 @@ def _mock_tool_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
 
     monkeypatch.setattr(
-        "catia_agent.planner.load_ollama_tools_from_mcp",
+        "catia_agent.planner.get_model_tools",
         fake_load_tools,
     )
 
@@ -610,7 +619,7 @@ async def test_plan_catia_action_sends_tools_in_deterministic_order(
         ]
 
     monkeypatch.setattr(
-        "catia_agent.planner.load_ollama_tools_from_mcp",
+        "catia_agent.planner.get_model_tools",
         fake_load_tools,
     )
 
@@ -931,7 +940,7 @@ def _mock_master_drawing_call(
         ]
 
     monkeypatch.setattr(
-        "catia_agent.planner.load_ollama_tools_from_mcp",
+        "catia_agent.planner.get_model_tools",
         fake_load_tools,
     )
     monkeypatch.setattr(

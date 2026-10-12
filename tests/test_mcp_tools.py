@@ -102,6 +102,7 @@ def test_tool_cache_is_initially_invalid() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="The worker uses an in-memory catalog; MCP discovery is disabled.")
 async def test_load_ollama_tools_from_mcp_uses_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -127,6 +128,7 @@ async def test_load_ollama_tools_from_mcp_uses_cache(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="The worker uses an in-memory catalog; MCP discovery is disabled.")
 async def test_load_ollama_tools_from_mcp_force_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

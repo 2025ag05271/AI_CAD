@@ -1,8 +1,6 @@
 import asyncio
-
 import numpy as np
 import pytest
-from types import SimpleNamespace
 
 from catia_agent import intent_classifier
 
@@ -49,30 +47,29 @@ def _stub_embeddings(
     non_agentic_vector: list[float],
     query_vector: list[float],
 ) -> None:
-    async def fake_aembed_documents(
-        phrases: list[str],
-    ) -> list[list[float]]:
-        if phrases == ["open the document"]:
-            return [agentic_vector]
+    async def fake_embed_texts(
+        texts: list[str],
+    ) -> np.ndarray:
+        if texts == ["open the document"]:
+            return np.asarray([agentic_vector], dtype=np.float32)
+        if texts == ["how do i create a pad"]:
+            return np.asarray([non_agentic_vector], dtype=np.float32)
+        return np.asarray(
+            [query_vector for _ in texts],
+            dtype=np.float32,
+        )
 
-        return [non_agentic_vector]
-
-    async def fake_aembed_query(
-        text: str,
-    ) -> list[float]:
-        return query_vector
-
-    # OllamaEmbeddings is a pydantic BaseModel: its instance attributes
-    # cannot be monkeypatched directly, so replace the whole
-    # module-level object with a lightweight stand-in instead.
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=fake_aembed_documents,
-            aembed_query=fake_aembed_query,
-        ),
+        "_embed_texts",
+        fake_embed_texts,
     )
+
+
+async def _raise_embedding_error(
+    texts: list[str],
+) -> np.ndarray:
+    raise ConnectionError("The local embedding model failed.")
 
 
 # ---------------------------------------------------------
@@ -173,27 +170,20 @@ async def test_classify_request_intent_strips_file_path_before_embedding(
 ) -> None:
     captured_queries: list[str] = []
 
-    async def fake_aembed_documents(
-        phrases: list[str],
-    ) -> list[list[float]]:
-        if phrases == ["open the document"]:
-            return [[1.0, 0.0]]
-
-        return [[0.0, 1.0]]
-
-    async def fake_aembed_query(
-        text: str,
-    ) -> list[float]:
-        captured_queries.append(text)
-        return [1.0, 0.0]
+    async def fake_embed_texts(
+        texts: list[str],
+    ) -> np.ndarray:
+        if texts == ["open the document"]:
+            return np.asarray([[1.0, 0.0]])
+        if texts == ["how do i create a pad"]:
+            return np.asarray([[0.0, 1.0]])
+        captured_queries.extend(texts)
+        return np.asarray([[1.0, 0.0] for _ in texts])
 
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=fake_aembed_documents,
-            aembed_query=fake_aembed_query,
-        ),
+        "_embed_texts",
+        fake_embed_texts,
     )
 
     await intent_classifier.classify_request_intent(
@@ -263,17 +253,10 @@ async def test_classify_request_intent_prefers_safer_route_below_margin(
 async def test_classify_request_intent_returns_none_on_embedding_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_aembed_documents(
-        phrases: list[str],
-    ) -> list[list[float]]:
-        raise ConnectionError("Ollama is not reachable.")
-
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=fake_aembed_documents
-        ),
+        "_embed_texts",
+        _raise_embedding_error,
     )
 
     result = await intent_classifier.classify_request_intent(
@@ -289,18 +272,16 @@ async def test_classify_request_intent_skips_embeddings_during_cooldown(
 ) -> None:
     calls = {"count": 0}
 
-    async def failing_aembed_documents(
-        phrases: list[str],
-    ) -> list[list[float]]:
+    async def failing_embed_texts(
+        texts: list[str],
+    ) -> np.ndarray:
         calls["count"] += 1
-        raise ConnectionError("Ollama is not reachable.")
+        raise ConnectionError("The local embedding model failed.")
 
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=failing_aembed_documents
-        ),
+        "_embed_texts",
+        failing_embed_texts,
     )
 
     assert await intent_classifier.classify_request_intent("a") is None
@@ -312,18 +293,16 @@ async def test_classify_request_intent_skips_embeddings_during_cooldown(
 async def test_classify_request_intent_returns_none_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def hanging_aembed_documents(
-        phrases: list[str],
-    ) -> list[list[float]]:
+    async def hanging_embed_texts(
+        texts: list[str],
+    ) -> np.ndarray:
         await asyncio.sleep(10)
-        return []
+        return np.empty((0, 0))
 
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=hanging_aembed_documents
-        ),
+        "_embed_texts",
+        hanging_embed_texts,
     )
     monkeypatch.setattr(
         intent_classifier.settings,
@@ -389,18 +368,16 @@ async def test_is_agentic_request_none_when_disabled(
     )
 
     async def fail_if_called(
-        phrases: list[str],
-    ) -> list[list[float]]:
+        texts: list[str],
+    ) -> np.ndarray:
         raise AssertionError(
             "Embeddings must not be called when disabled."
         )
 
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=fail_if_called
-        ),
+        "_embed_texts",
+        fail_if_called,
     )
 
     assert (
@@ -415,17 +392,10 @@ async def test_is_agentic_request_none_when_disabled(
 async def test_is_agentic_request_none_on_embedding_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_aembed_documents(
-        phrases: list[str],
-    ) -> list[list[float]]:
-        raise ConnectionError("Ollama is not reachable.")
-
     monkeypatch.setattr(
         intent_classifier,
-        "embeddings",
-        SimpleNamespace(
-            aembed_documents=fake_aembed_documents
-        ),
+        "_embed_texts",
+        _raise_embedding_error,
     )
 
     assert (

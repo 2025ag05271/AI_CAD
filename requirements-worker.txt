@@ -1,0 +1,12 @@
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+httpx==0.28.1
+langgraph==1.2.11
+llama-cpp-python==0.3.36
+numpy==2.4.6
+pydantic==2.13.4
+pydantic-settings==2.14.2
+truststore==0.10.4
+
+# Build-only dependency; the deployed application is CatiaAgentWorker.exe.
+pyinstaller==6.22.3

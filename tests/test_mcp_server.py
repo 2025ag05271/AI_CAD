@@ -5,6 +5,11 @@ from fastmcp.exceptions import ToolError
 from catia_mcp.server import mcp
 
 
+pytestmark = pytest.mark.skip(
+    reason="MCP transport is disabled; JSON worker tests cover the active runtime."
+)
+
+
 # ---------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------
