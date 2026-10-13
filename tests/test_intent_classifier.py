@@ -4,6 +4,8 @@ import pytest
 
 from catia_agent import intent_classifier
 
+_PRODUCTION_EXEMPLAR_INTENTS = intent_classifier.EXEMPLAR_INTENTS
+
 
 # ---------------------------------------------------------
 # Fixtures
@@ -75,6 +77,31 @@ async def _raise_embedding_error(
 # ---------------------------------------------------------
 # Pure helper functions
 # ---------------------------------------------------------
+
+def test_master_drawing_examples_cover_commands_and_questions() -> None:
+    agentic_examples = _PRODUCTION_EXEMPLAR_INTENTS[
+        intent_classifier.AGENTIC_INTENT
+    ]
+    knowledge_examples = _PRODUCTION_EXEMPLAR_INTENTS[
+        intent_classifier.NON_AGENTIC_INTENT
+    ]
+
+    assert any(
+        "open the master drawing" in example.lower()
+        for example in agentic_examples
+    )
+    assert any(
+        "show me the master drawing" in example.lower()
+        for example in agentic_examples
+    )
+    assert any(
+        "how do i open a master drawing" in example.lower()
+        for example in knowledge_examples
+    )
+    assert any(
+        "what is a master drawing" in example.lower()
+        for example in knowledge_examples
+    )
 
 def test_normalize_produces_unit_vectors() -> None:
     normalized = intent_classifier._normalize(

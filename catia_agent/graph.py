@@ -278,6 +278,22 @@ async def _start_run(
             user_message
         )
 
+        has_explicit_action_shape = (
+            planning_mode_confidence == "high"
+            and planning_expected_actions is not None
+        )
+        if is_agentic is False and has_explicit_action_shape:
+            logger.info(
+                "embedding_classifier_overridden_by_explicit_action_shape",
+                extra={
+                    "runId": run_id,
+                    "planningMode": planning_mode,
+                    "planningModeConfidence": planning_mode_confidence,
+                    "expectedActionCount": planning_expected_actions,
+                },
+            )
+            is_agentic = True
+
         initial_state: CatiaAgentState = {
             "session_id": session_id,
             "run_id": run_id,

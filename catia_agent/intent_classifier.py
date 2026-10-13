@@ -24,9 +24,9 @@ logger = get_logger(__name__)
 # Ask-vs-agent intent classification
 #
 # Decides whether a user message is a concrete CATIA action request
-# ("agentic") or a general/informational message, using a local Ollama
-# embedding model (qllama/bge-small-en-v1.5) instead of spending a
-# model round trip on that decision. The local GGUF is loaded in-process;
+# ("agentic") or a general/informational message, using the qllama
+# BGE-small GGUF in-process instead of spending a model round trip on
+# that decision. The GGUF is loaded directly;
 # the tool-calling model is always Azure AI Foundry.
 # -------------------------------------------------------------------------
 
@@ -94,6 +94,9 @@ EXEMPLAR_INTENTS: dict[str, list[str]] = {
         # Drafting, tolerancing, and standards
         "How do I generate a drawing from a 3D model?",
         "How can I create section and detail views in Drafting?",
+        "How do I open a master drawing in CATIA?",
+        "What is a master drawing used for?",
+        "How can I find the correct master drawing revision?",
         "How do I add dimensions and tolerances to a CATDrawing?",
         "What are the criteria for applying geometric tolerances in a drawing?",
         "Please remind me of the rules for tolerancing a technical drawing.",
@@ -157,6 +160,10 @@ EXEMPLAR_INTENTS: dict[str, list[str]] = {
         "Open the bearing housing CATPart.",
         "Load the assembly from my local folder.",
         "Please open the latest downloaded CATDrawing.",
+        "Can you please open the master drawing of part 674898900A?",
+        "Open the master drawing for part number 674089800A revision 01.",
+        "Please show me the master drawing for 674089800A.",
+        "Bring up the master drawing for part 674898900A.",
         "Open product 6328629 revision CAD000.",
         "Launch CATIA and open the active project assembly.",
 

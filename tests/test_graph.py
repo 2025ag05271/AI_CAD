@@ -264,6 +264,62 @@ async def test_embedding_classifier_uncertain_falls_back_to_planner(
 
 
 @pytest.mark.asyncio
+async def test_explicit_master_drawing_command_overrides_embedding_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_is_agentic_request(user_message: str) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "catia_agent.graph.is_agentic_request",
+        fake_is_agentic_request,
+    )
+
+    fake_plan_catia_action = _patch_planner(
+        monkeypatch,
+        _open_action_result(),
+    )
+
+    response = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message=(
+            "Can you please open the master drawing of 674898900A"
+        ),
+    )
+
+    assert response["status"] == "action_required"
+    assert fake_plan_catia_action.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_informational_open_question_still_routes_to_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_is_agentic_request(user_message: str) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "catia_agent.graph.is_agentic_request",
+        fake_is_agentic_request,
+    )
+
+    fake_plan_catia_action = _patch_planner(
+        monkeypatch,
+        _open_action_result(),
+    )
+
+    response = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message=(
+            "How do I open a master drawing in CATIA?"
+        ),
+    )
+
+    assert response["status"] == "non_agentic"
+    assert fake_plan_catia_action.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_start_catia_agent_returns_clarification_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
