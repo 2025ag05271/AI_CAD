@@ -1,0 +1,543 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "workbookName": "GPMData.xls",
+    "workbookSha256": "efd3ae2ad9a245cc77bb98b86a1caa34b7cc8f557adbcabcb8424b7778092232",
+    "sheetName": "sheet001.htm",
+    "sheetSha256": "137dfb3e37a075a165712752d99e9fa4e5c40a321a2071f16fd60724b1942ff4"
+  },
+  "recordCount": 35,
+  "records": [
+    {
+      "componentTitleFamily": "Armature",
+      "plmStandardTitle": "ARMATURE ASSY :",
+      "titleAliases": [
+        "ARMATURE ASSY :"
+      ],
+      "keywords": [
+        "Arm",
+        "Armature",
+        "casting",
+        "Die-casting"
+      ],
+      "partNumber": "6404078",
+      "masterDrawingOrOgdLabel": "6404078",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6404078/*"
+    },
+    {
+      "componentTitleFamily": "Armature",
+      "plmStandardTitle": "ARMATURE, HYBRID ;",
+      "titleAliases": [
+        "ARMATURE, HYBRID"
+      ],
+      "keywords": [
+        "Arm",
+        "Armature",
+        "casting",
+        "Die-casting"
+      ],
+      "partNumber": "6404078",
+      "masterDrawingOrOgdLabel": "6404078",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6404078/*"
+    },
+    {
+      "componentTitleFamily": "Armature",
+      "plmStandardTitle": "ARMATURE, MONOBLOCK ;",
+      "titleAliases": [
+        "ARMATURE, MONOBLOCK"
+      ],
+      "keywords": [
+        "Arm",
+        "Armature",
+        "casting",
+        "Die-casting"
+      ],
+      "partNumber": "6404078",
+      "masterDrawingOrOgdLabel": "6404078",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6404078/*"
+    },
+    {
+      "componentTitleFamily": "Armature",
+      "plmStandardTitle": "ARMATURE, WELDING",
+      "titleAliases": [
+        "ARMATURE, WELDING"
+      ],
+      "keywords": [
+        "Arm",
+        "Armature",
+        "casting",
+        "Die-casting"
+      ],
+      "partNumber": "6404078",
+      "masterDrawingOrOgdLabel": "6404078",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6404078/*"
+    },
+    {
+      "componentTitleFamily": "As Molded / Chemicals",
+      "plmStandardTitle": "STEER WHEEL, AS MOLDED WITH FOAM BACKSHELL ;",
+      "titleAliases": [
+        "STEER WHEEL, AS MOLDED WITH FOAM BACKSHELL"
+      ],
+      "keywords": [
+        "PU",
+        "Polyurethane",
+        "Urethane",
+        "Isocyanate",
+        "Polyol"
+      ],
+      "partNumber": "6475281",
+      "masterDrawingOrOgdLabel": "6475281",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6475281/*"
+    },
+    {
+      "componentTitleFamily": "As Molded / Chemicals",
+      "plmStandardTitle": "STEER WHEEL, AS MOLDED WITH PLASTIC BACKSHELL",
+      "titleAliases": [
+        "STEER WHEEL, AS MOLDED WITH PLASTIC BACKSHELL"
+      ],
+      "keywords": [
+        "PU",
+        "Polyurethane",
+        "Urethane",
+        "Isocyanate",
+        "Polyol"
+      ],
+      "partNumber": "6475281",
+      "masterDrawingOrOgdLabel": "6475281",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6475281/*"
+    },
+    {
+      "componentTitleFamily": "As wrapped",
+      "plmStandardTitle": "SW as Wrapped with Foam Backshell ; SW as Wrapped with Plastic Backshell",
+      "titleAliases": [
+        "SW as Wrapped with Foam Backshell",
+        "SW as Wrapped with Plastic Backshell"
+      ],
+      "keywords": [],
+      "partNumber": "6481549",
+      "masterDrawingOrOgdLabel": "6481549",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6481549/%2a"
+    },
+    {
+      "componentTitleFamily": "Back Shell",
+      "plmStandardTitle": "BACKSHELL, XXX",
+      "titleAliases": [
+        "BACKSHELL, XXX"
+      ],
+      "keywords": [
+        "Backshell",
+        "backcover"
+      ],
+      "partNumber": "6481212",
+      "masterDrawingOrOgdLabel": "6481212",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6481212/*"
+    },
+    {
+      "componentTitleFamily": "Back Shell Lid",
+      "plmStandardTitle": "BACKSHELL, LID, XXX",
+      "titleAliases": [
+        "BACKSHELL, LID, XXX"
+      ],
+      "keywords": [
+        "lid",
+        "plastic lid",
+        "backcover lid"
+      ],
+      "partNumber": "6481333",
+      "masterDrawingOrOgdLabel": "6481333",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6481333/*"
+    },
+    {
+      "componentTitleFamily": "Blank Label",
+      "plmStandardTitle": "LABEL, BLANK",
+      "titleAliases": [
+        "LABEL, BLANK"
+      ],
+      "keywords": [
+        "label",
+        "blank label",
+        "customer label",
+        "internal label"
+      ],
+      "partNumber": "6353331",
+      "masterDrawingOrOgdLabel": "6353331",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6353331/%2a"
+    },
+    {
+      "componentTitleFamily": "Deco Part Garnish",
+      "plmStandardTitle": "DECO PART GARNISH, XXX",
+      "titleAliases": [
+        "DECO PART GARNISH, XXX"
+      ],
+      "keywords": [
+        "deco",
+        "deco part",
+        "garnish"
+      ],
+      "partNumber": "6481213",
+      "masterDrawingOrOgdLabel": "6481213",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6481213/*"
+    },
+    {
+      "componentTitleFamily": "Deco Part Rim Inlay",
+      "plmStandardTitle": "DECO PART RIM INLAY, XXX",
+      "titleAliases": [
+        "DECO PART RIM INLAY, XXX"
+      ],
+      "keywords": [
+        "deco",
+        "deco part",
+        "garnish"
+      ],
+      "partNumber": "6481213",
+      "masterDrawingOrOgdLabel": "6481213",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6481213/*"
+    },
+    {
+      "componentTitleFamily": "Heater Element",
+      "plmStandardTitle": "ELEMENT, HEATER, XXX",
+      "titleAliases": [
+        "ELEMENT, HEATER, XXX"
+      ],
+      "keywords": [
+        "Heating mat",
+        "heat",
+        "heater mat",
+        "mat"
+      ],
+      "partNumber": "6486700",
+      "masterDrawingOrOgdLabel": "6486700",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6486700/%2a"
+    },
+    {
+      "componentTitleFamily": "HOD Element",
+      "plmStandardTitle": "ELEMENT, HOD ;",
+      "titleAliases": [
+        "ELEMENT, HOD"
+      ],
+      "keywords": [
+        "Hod",
+        "Hod mat",
+        "mat"
+      ],
+      "partNumber": "6534973",
+      "masterDrawingOrOgdLabel": "6534973",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6534973/*"
+    },
+    {
+      "componentTitleFamily": "HOD Element",
+      "plmStandardTitle": "ELEMENT, HOD-HEATER",
+      "titleAliases": [
+        "ELEMENT, HOD-HEATER"
+      ],
+      "keywords": [
+        "Hod",
+        "Hod mat",
+        "mat"
+      ],
+      "partNumber": "6534973",
+      "masterDrawingOrOgdLabel": "6534973",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6534973/*"
+    },
+    {
+      "componentTitleFamily": "Insert, Plastic Reinforcer",
+      "plmStandardTitle": "INSERT, PLASTIC, REINFORCEMENT",
+      "titleAliases": [
+        "INSERT, PLASTIC, REINFORCEMENT"
+      ],
+      "keywords": [
+        "plastic insert",
+        "insert"
+      ],
+      "partNumber": "6508115",
+      "masterDrawingOrOgdLabel": "6508115",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6508115/*"
+    },
+    {
+      "componentTitleFamily": "Label",
+      "plmStandardTitle": "Blank Label and BLank Label Supplier Printed and Blank Label Roll",
+      "titleAliases": [
+        "Blank Label and BLank Label Supplier Printed and Blank Label Roll"
+      ],
+      "keywords": [
+        "Labels",
+        "identification",
+        "tag",
+        "etiquette"
+      ],
+      "partNumber": "6353331",
+      "masterDrawingOrOgdLabel": "6353331",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6353331/*"
+    },
+    {
+      "componentTitleFamily": "Leather Loop / Components",
+      "plmStandardTitle": "FABRIC, COATED ARTIFICIAL LOOP ;",
+      "titleAliases": [
+        "FABRIC, COATED ARTIFICIAL LOOP"
+      ],
+      "keywords": [
+        "As-wrapped",
+        "Aswrapped",
+        "PU with leather"
+      ],
+      "partNumber": "6536096",
+      "masterDrawingOrOgdLabel": "6536096",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/PartDrawing/6536096/%2a"
+    },
+    {
+      "componentTitleFamily": "Leather Loop / Components",
+      "plmStandardTitle": "FABRIC, SUEDE ARTIFICIAL LOOP ;",
+      "titleAliases": [
+        "FABRIC, SUEDE ARTIFICIAL LOOP"
+      ],
+      "keywords": [
+        "As-wrapped",
+        "Aswrapped",
+        "PU with leather"
+      ],
+      "partNumber": "6536096",
+      "masterDrawingOrOgdLabel": "6536096",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/PartDrawing/6536096/%2a"
+    },
+    {
+      "componentTitleFamily": "Leather Loop / Components",
+      "plmStandardTitle": "LEATHER, SPLIT LOOP ;",
+      "titleAliases": [
+        "LEATHER, SPLIT LOOP"
+      ],
+      "keywords": [
+        "As-wrapped",
+        "Aswrapped",
+        "PU with leather"
+      ],
+      "partNumber": "6536096",
+      "masterDrawingOrOgdLabel": "6536096",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/PartDrawing/6536096/%2a"
+    },
+    {
+      "componentTitleFamily": "Leather Loop / Components",
+      "plmStandardTitle": "LEATHER, TOP GRAIN LOOP",
+      "titleAliases": [
+        "LEATHER, TOP GRAIN LOOP"
+      ],
+      "keywords": [
+        "As-wrapped",
+        "Aswrapped",
+        "PU with leather"
+      ],
+      "partNumber": "6536096",
+      "masterDrawingOrOgdLabel": "6536096",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/PartDrawing/6536096/%2a"
+    },
+    {
+      "componentTitleFamily": "Omega Spring",
+      "plmStandardTitle": "SPRING, DAB RETENTION IN SW (ASW8)",
+      "titleAliases": [
+        "SPRING, DAB RETENTION IN SW (ASW8)"
+      ],
+      "keywords": [
+        "omega spring",
+        "DAB retention spring",
+        "DAB spring",
+        "Spring"
+      ],
+      "partNumber": "6557983",
+      "masterDrawingOrOgdLabel": "Master DWG : 6557983",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6557983/%2a"
+    },
+    {
+      "componentTitleFamily": "Omega Spring",
+      "plmStandardTitle": "SPRING, DAB RETENTION IN SW (ASW8)",
+      "titleAliases": [
+        "SPRING, DAB RETENTION IN SW (ASW8)"
+      ],
+      "keywords": [
+        "omega spring",
+        "DAB retention spring",
+        "DAB spring",
+        "Spring"
+      ],
+      "partNumber": "6446798",
+      "masterDrawingOrOgdLabel": "OGD : 6446798",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/linkto/latestreleased/PartDrawing/6446798/%2a"
+    },
+    {
+      "componentTitleFamily": "Omega Spring",
+      "plmStandardTitle": "SPRING, DAB RETENTION IN SW (ASW8)",
+      "titleAliases": [
+        "SPRING, DAB RETENTION IN SW (ASW8)"
+      ],
+      "keywords": [
+        "omega spring",
+        "DAB retention spring",
+        "DAB spring",
+        "Spring"
+      ],
+      "partNumber": "6471900",
+      "masterDrawingOrOgdLabel": "OGD : 6471900",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/linkto/latestreleased/PartDrawing/6471900/%2a"
+    },
+    {
+      "componentTitleFamily": "PMI Bar",
+      "plmStandardTitle": "PMI BAR, NON ROUND ;",
+      "titleAliases": [
+        "PMI BAR, NON ROUND"
+      ],
+      "keywords": [
+        "PMI bar",
+        "MOI bar",
+        "MOI",
+        "bar",
+        "rod",
+        "steel rod"
+      ],
+      "partNumber": "6403222",
+      "masterDrawingOrOgdLabel": "6403222",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6403222/*"
+    },
+    {
+      "componentTitleFamily": "PMI Bar",
+      "plmStandardTitle": "PMI BAR, ROUND",
+      "titleAliases": [
+        "PMI BAR, ROUND"
+      ],
+      "keywords": [
+        "PMI bar",
+        "MOI bar",
+        "MOI",
+        "bar",
+        "rod",
+        "steel rod"
+      ],
+      "partNumber": "6403222",
+      "masterDrawingOrOgdLabel": "6403222",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6403222/*"
+    },
+    {
+      "componentTitleFamily": "Rivet - Horn Contact",
+      "plmStandardTitle": "HORN CONTACT",
+      "titleAliases": [
+        "HORN CONTACT"
+      ],
+      "keywords": [
+        "rivet",
+        "horn contact",
+        "horn rivet"
+      ],
+      "partNumber": "6342402",
+      "masterDrawingOrOgdLabel": "6342402",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6342402/*"
+    },
+    {
+      "componentTitleFamily": "Rivets",
+      "plmStandardTitle": "Rivet",
+      "titleAliases": [
+        "Rivet"
+      ],
+      "keywords": [
+        "fastener axis",
+        "screw",
+        "fastener"
+      ],
+      "partNumber": "6339215",
+      "masterDrawingOrOgdLabel": "6339215",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6339215/*"
+    },
+    {
+      "componentTitleFamily": "Screws",
+      "plmStandardTitle": "STANDARD PARTS, Screw XXX",
+      "titleAliases": [
+        "STANDARD PARTS, Screw XXX"
+      ],
+      "keywords": [
+        "bolt screw threaded fastener thread form former forming taptite screws"
+      ],
+      "partNumber": "6338546",
+      "masterDrawingOrOgdLabel": "6338546",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6338546/*"
+    },
+    {
+      "componentTitleFamily": "Spacers",
+      "plmStandardTitle": "(standard parts, Plain Metal Cylindrical and Stepped Spacer",
+      "titleAliases": [
+        "(standard parts, Plain Metal Cylindrical and Stepped Spacer"
+      ],
+      "keywords": [
+        "bushing washer"
+      ],
+      "partNumber": "6365574",
+      "masterDrawingOrOgdLabel": "6365574",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6365574/*"
+    },
+    {
+      "componentTitleFamily": "Spring - DAB Retention in SW",
+      "plmStandardTitle": "SPRING, DAB RETENTION IN SW",
+      "titleAliases": [
+        "SPRING, DAB RETENTION IN SW"
+      ],
+      "keywords": [],
+      "partNumber": "6557983",
+      "masterDrawingOrOgdLabel": "6557983",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6557983/*"
+    },
+    {
+      "componentTitleFamily": "Steel Hub",
+      "plmStandardTitle": "STEEL HUB, XXX",
+      "titleAliases": [
+        "STEEL HUB, XXX"
+      ],
+      "keywords": [
+        "hub",
+        "steel hub",
+        "hub core",
+        "steel"
+      ],
+      "partNumber": "6459556",
+      "masterDrawingOrOgdLabel": "6459556",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6459556/*"
+    },
+    {
+      "componentTitleFamily": "Traceability Label",
+      "plmStandardTitle": "LABEL, TRACEABILITY",
+      "titleAliases": [
+        "LABEL, TRACEABILITY"
+      ],
+      "keywords": [
+        "Label",
+        "GPM label"
+      ],
+      "partNumber": "6465234",
+      "masterDrawingOrOgdLabel": "6465234",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6465234/*"
+    },
+    {
+      "componentTitleFamily": "Vibration Motor",
+      "plmStandardTitle": "ACTUATOR, VIBRATION MOTOR",
+      "titleAliases": [
+        "ACTUATOR, VIBRATION MOTOR"
+      ],
+      "keywords": [
+        "alert motor",
+        "motor"
+      ],
+      "partNumber": "6492517",
+      "masterDrawingOrOgdLabel": "6492517",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6492517/*"
+    },
+    {
+      "componentTitleFamily": "Wiring Harness",
+      "plmStandardTitle": "WIRING HARNESS",
+      "titleAliases": [
+        "WIRING HARNESS"
+      ],
+      "keywords": [],
+      "partNumber": "6534760",
+      "masterDrawingOrOgdLabel": "6534760",
+      "masterDrawingOrOgdUrl": "https://plm.autoliv.int/enovia/goto/download/latestreleased/Drawing%20Print/6534760/*"
+    }
+  ],
+  "conversionStats": {
+    "rowsWithTitleAndDrawingLink": 55,
+    "rejectedNonDrawingLinks": 45
+  }
+}

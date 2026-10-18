@@ -19,6 +19,7 @@ from catia_agent.models import (
     UnsupportedRequestResult,
 )
 from catia_agent.planner import (
+        _guard_master_drawing_arguments,
     build_catia_context_message,
     create_typed_action,
     plan_catia_action,
@@ -1060,4 +1061,76 @@ async def test_open_master_drawing_drops_invented_revision(
 
     assert isinstance(result, ActionRequiredResult)
     assert result.action.arguments.partRevision is None
+
+
+def test_master_drawing_title_guard_injects_catalog_link() -> None:
+    arguments = {"partTitle": "backshell"}
+
+    result = _guard_master_drawing_arguments(
+        arguments,
+        ["Can you open the master drawing of backshell?"],
+    )
+
+    assert result is None
+    action = create_typed_action(
+        "open_master_drawing",
+        arguments,
+    )
+    assert action.arguments.partNumber == "6481212"
+    assert action.arguments.masterDrawingOrOgdUrl.endswith(
+        "/Drawing%20Print/6481212/*"
+    )
+
+
+def test_master_drawing_title_guard_asks_when_catalog_match_is_ambiguous() -> None:
+    result = _guard_master_drawing_arguments(
+        {"partTitle": "spring dab retention in sw asw8"},
+        ["Open the master drawing for spring dab retention in SW ASW8."],
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "partTitle"
+    assert "multiple master-drawing matches" in result.message
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_title_resolves_catalog_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(
+        monkeypatch,
+        {"partTitle": "backshell"},
+    )
+
+    result = await plan_catia_action(
+        user_command="Can you open the master drawing of backshell?",
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.arguments.partNumber == "6481212"
+    assert result.action.arguments.partTitle == "backshell"
+    assert result.action.arguments.masterDrawingOrOgdLabel == "6481212"
+    assert result.action.arguments.masterDrawingOrOgdUrl.endswith(
+        "/Drawing%20Print/6481212/*"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_ambiguous_title_asks_for_clarification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(
+        monkeypatch,
+        {"partTitle": "spring dab retention in sw asw8"},
+    )
+
+    result = await plan_catia_action(
+        user_command=(
+            "Open the master drawing for spring dab retention in SW ASW8."
+        ),
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "partTitle"
+    assert "multiple master-drawing matches" in result.message
 

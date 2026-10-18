@@ -8,6 +8,10 @@ from typing import Any
 from pydantic import ValidationError
 
 from catia_agent.config import settings
+from catia_agent.gpm_catalog import (
+    normalize_title,
+    resolve_master_drawing_title,
+)
 from catia_agent.logging_config import Stopwatch, get_logger, log_event
 from catia_agent.model_providers import (
     MODEL_NAME,
@@ -784,8 +788,8 @@ def _build_followup_system_prompt() -> str:
 # -------------------------------------------------------------------------
 
 MASTER_DRAWING_PART_NUMBER_QUESTION = (
-    "Which part number's master drawing should I open? You can also "
-    "give a revision."
+    "Which part number or product title should I use to find the "
+    "master drawing? You can also give a revision with a part number."
 )
 
 
@@ -794,15 +798,114 @@ def _guard_master_drawing_arguments(
     user_texts: list[str],
 ) -> ClarificationRequiredResult | None:
     """
-    Ask for the part number when it is missing or does not appear in
-    anything the user wrote; drop a revision the user never gave.
+    Resolve explicit identifiers or find a unique master-drawing row
+    from a user-provided title. Never trust a model-supplied URL.
     """
 
-    user_text = " ".join(user_texts).upper()
-
+    user_text = " ".join(user_texts)
+    user_text_upper = user_text.upper()
     part_number = str(tool_arguments.get("partNumber") or "").strip()
+    part_revision = str(tool_arguments.get("partRevision") or "").strip()
+    part_title = str(tool_arguments.get("partTitle") or "").strip()
 
-    if not part_number or part_number.upper() not in user_text:
+    # The model does not receive a URL field in its tool schema. Remove
+    # any unsolicited value so only the validated catalog can supply it.
+    tool_arguments.pop("masterDrawingOrOgdUrl", None)
+    tool_arguments.pop("masterDrawingOrOgdLabel", None)
+    tool_arguments.pop("plmStandardTitle", None)
+
+    part_number_was_explicit = bool(
+        part_number and part_number.upper() in user_text_upper
+    )
+
+    if part_title and not part_number_was_explicit:
+        normalized_title = normalize_title(part_title)
+        normalized_user_text = normalize_title(user_text)
+
+        if (
+            not normalized_title
+            or normalized_title not in normalized_user_text
+        ):
+            log_event(
+                logger,
+                "master_drawing_unmentioned_title_rejected",
+                level=logging.WARNING,
+            )
+            return ClarificationRequiredResult(
+                status="clarification_required",
+                message=(
+                    "Please provide the product title you want me to "
+                    "search for in the master-drawing catalog."
+                ),
+                missingField="partTitle",
+            )
+
+        if part_revision:
+            return ClarificationRequiredResult(
+                status="clarification_required",
+                message=(
+                    "The title catalog opens its listed released drawing. "
+                    "For a specific revision, please provide the part "
+                    "number and revision instead."
+                ),
+                missingField="partNumber",
+            )
+
+        resolution = resolve_master_drawing_title(part_title)
+        if resolution["status"] == "not_found":
+            return ClarificationRequiredResult(
+                status="clarification_required",
+                message=(
+                    f"I couldn't find a master drawing for '{part_title}'. "
+                    "Please provide a part number or a more specific title."
+                ),
+                missingField="partTitle",
+            )
+
+        if resolution["status"] == "ambiguous":
+            candidate_names = [
+                str(
+                    candidate.get("plmStandardTitle")
+                    or candidate.get("componentTitleFamily")
+                    or "matching item"
+                )
+                for candidate in resolution["candidates"]
+            ]
+            options = "; ".join(candidate_names)
+            return ClarificationRequiredResult(
+                status="clarification_required",
+                message=(
+                    f"I found multiple master-drawing matches for "
+                    f"'{part_title}': {options}. Which one do you mean?"
+                ),
+                missingField="partTitle",
+            )
+
+        record = resolution["record"]
+        tool_arguments.update(
+            {
+                "partNumber": record["partNumber"],
+                "partRevision": None,
+                "partTitle": part_title,
+                "plmStandardTitle": record["plmStandardTitle"],
+                "masterDrawingOrOgdLabel": (
+                    record["masterDrawingOrOgdLabel"]
+                ),
+                "masterDrawingOrOgdUrl": (
+                    record["masterDrawingOrOgdUrl"]
+                ),
+            }
+        )
+        log_event(
+            logger,
+            "master_drawing_title_resolved",
+            partNumber=record["partNumber"],
+            matchedTitle=record["plmStandardTitle"],
+            matchScore=resolution["score"],
+        )
+        return None
+
+    if not part_number or part_number.upper() not in user_text_upper:
         log_event(
             logger,
             "master_drawing_part_number_required",
@@ -816,9 +919,7 @@ def _guard_master_drawing_arguments(
             missingField="partNumber",
         )
 
-    part_revision = str(tool_arguments.get("partRevision") or "").strip()
-
-    if part_revision and part_revision.upper() not in user_text:
+    if part_revision and part_revision.upper() not in user_text_upper:
         log_event(
             logger,
             "master_drawing_unmentioned_revision_dropped",

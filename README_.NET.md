@@ -1142,8 +1142,9 @@ message directly.
 
 ### `open_master_drawing`
 
-Opens the master drawing of a part. Python always sends both keys;
-`partRevision` is `null` when the user did not give one:
+Opens a master drawing using either an explicit part number, or a title
+resolved against the bundled GPM catalog. `partRevision` is `null` when
+the user did not give one.
 
 ```json
 {
@@ -1159,13 +1160,39 @@ Opens the master drawing of a part. Python always sends both keys;
 }
 ```
 
-Python guarantees `partNumber` is present, trimmed, upper-cased, and was
-actually typed by the user. A revision-only request never reaches .NET;
-Python asks the user for the part number instead. .NET should still
-validate defensively:
+For title lookup, Python resolves the unique matching record and sends
+the hyperlink's document number and URL:
+
+```json
+{
+    "partNumber": "6481212",
+    "partRevision": null,
+    "partTitle": "backshell",
+    "plmStandardTitle": "BACKSHELL, XXX",
+    "masterDrawingOrOgdLabel": "6481212",
+    "masterDrawingOrOgdUrl": "<PLM drawing hyperlink from the catalog>"
+}
+```
+
+In this case `partNumber` is the drawing/OGD identifier shown by the
+spreadsheet hyperlink, not necessarily the user's input part number.
+`masterDrawingOrOgdUrl` is extracted from that hyperlink. If several
+different drawings match the title, Python asks for clarification and
+does not send an action to .NET. A title-based catalog entry currently
+selects the listed released document; a specific revision should use the
+part-number path instead.
+
+For direct part-number requests, Python guarantees `partNumber` is
+present, trimmed, upper-cased, and actually typed by the user. A
+revision-only request never reaches .NET; Python asks for a part number.
+.NET should validate defensively:
 
 - Reject a missing or empty `partNumber` with
   `INVALID_ACTION_ARGUMENTS`.
+- When `masterDrawingOrOgdUrl` is present, independently require HTTPS,
+  the approved PLM host, and a supported drawing/PartDrawing path before
+  opening it. Do not accept an arbitrary URL merely because Python sent
+  it.
 - When `partRevision` is `null`, apply the business rule for "no
   revision given" (for example, open the latest released master
   drawing), and report which revision was actually opened in the

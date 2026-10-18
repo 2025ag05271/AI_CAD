@@ -11,8 +11,11 @@ _TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "open_master_drawing",
             "description": (
                 "Prepare opening the master drawing for a part. "
-                "Use only the part number and optional revision stated "
-                "by the user. If the part number is missing, ask for it."
+                "Use partNumber with an optional partRevision when the "
+                "user provides an identifier. If the user gives only a "
+                "title or product name, place that phrase in partTitle; "
+                "the application will resolve its PLM drawing link. "
+                "Never invent a part number, revision, title, or URL."
             ),
             "parameters": {
                 "type": "object",
@@ -24,6 +27,10 @@ _TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "partRevision": {
                         "type": ["string", "null"],
                         "description": "Optional part revision explicitly given by the user.",
+                    },
+                    "partTitle": {
+                        "type": ["string", "null"],
+                        "description": "Title or product name explicitly supplied by the user when no part number is given.",
                     },
                 },
                 "required": [],

@@ -12,6 +12,7 @@ from pydantic import (
 )
 
 from catia_agent.config import settings
+from catia_agent.gpm_catalog import is_approved_drawing_url
 from catia_agent.utils import (
     validate_download_cad_inputs,
     validate_open_master_drawing_inputs,
@@ -257,6 +258,10 @@ class StartModelArguments(InternalModel):
 class OpenMasterDrawingArguments(InternalModel):
     partNumber: NonEmptyString
     partRevision: NonEmptyString | None = None
+    partTitle: NonEmptyString | None = None
+    plmStandardTitle: NonEmptyString | None = None
+    masterDrawingOrOgdLabel: NonEmptyString | None = None
+    masterDrawingOrOgdUrl: NonEmptyString | None = None
 
     @model_validator(mode="after")
     def validate_identifiers(
@@ -271,6 +276,16 @@ class OpenMasterDrawingArguments(InternalModel):
 
         object.__setattr__(self, "partNumber", part_number)
         object.__setattr__(self, "partRevision", part_revision)
+
+        if (
+            self.masterDrawingOrOgdUrl is not None
+            and not is_approved_drawing_url(
+                self.masterDrawingOrOgdUrl
+            )
+        ):
+            raise ValueError(
+                "masterDrawingOrOgdUrl must use an approved PLM drawing link."
+            )
 
         return self
 

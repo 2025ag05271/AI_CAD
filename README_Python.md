@@ -135,6 +135,8 @@ catia-agent-poc/
 |-- build_worker.ps1
 |-- catia_agent_worker.spec
 |-- scripts/prepare_worker_model.py
+|-- scripts/convert_gpm_catalog.py
+|-- data/gpm_master_drawings.v1.json
 |-- show_graph.py
 |
 |-- catia_agent/
@@ -182,6 +184,13 @@ the compiled LangGraph.
 The current in-memory catalog exposes only `open_master_drawing`. MCP is
 not queried or started by the worker; the retained API/MCP modules are
 legacy prototype code and are not included in the executable.
+
+Title-only requests use the versioned GPM JSON catalog. It contains only
+the component family, PLM standard title, keywords, hyperlink label,
+resolved drawing number, and approved drawing/OGD URL. Contact and
+unrelated spreadsheet columns are excluded. The converter expands
+Excel-merged cells, deduplicates rows, and filters out specifications
+and other non-drawing links.
 
 ## 6. Configuration
 
@@ -1548,6 +1557,17 @@ The executable does not start FastAPI, MCP, or Ollama. The WPF process
 starts it with redirected standard input/output and follows
 [WORKER_PROTOCOL.md](WORKER_PROTOCOL.md). `python worker.py` can be used
 for source-level development with the same protocol.
+
+To refresh the checked-in GPM snapshot from this Excel-exported HTML
+workbook, keep the sibling `GPMData_files` directory beside the `.xls`
+and run:
+
+```powershell
+python scripts/convert_gpm_catalog.py --source "C:\Data\GPMData.xls"
+```
+
+Review the generated JSON diff and record count before distributing the
+updated catalog. The next executable build bundles that versioned file.
 
 ## 15. Adding a new CATIA tool
 
