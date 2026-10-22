@@ -532,6 +532,14 @@ The protocol carries `requestId` for correlation and returns a JSON
 or request failures. Agent outcomes remain in the response payload and
 use the existing status contract below.
 
+When `clarification_required.options` is present, render each option's
+`label` as a selectable WPF choice. Send only its `choiceId` with the
+original `sessionId`; the worker resolves the one-time choice back to
+the bundled catalog record. The option includes `partNumber`,
+`plmStandardTitle`, `componentTitleFamily`, and `documentKind` for UI
+context. Do not send a URL from the UI; the worker intentionally keeps
+the hyperlink out of the option payload.
+
 ### Session identifier constraints
 
 `sessionId` in a `start_run` payload must match `^[A-Za-z0-9._:-]+$`

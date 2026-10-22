@@ -421,10 +421,20 @@ class NonAgenticResult(InternalModel):
     ] = "general_conversation"
 
 
+class ClarificationOption(InternalModel):
+    choiceId: NonEmptyString
+    label: NonEmptyString
+    partNumber: NonEmptyString
+    plmStandardTitle: NonEmptyString
+    componentTitleFamily: NonEmptyString | None = None
+    documentKind: Literal["master_drawing", "ogd"]
+
+
 class ClarificationRequiredResult(InternalModel):
     status: Literal["clarification_required"]
     message: NonEmptyString
     missingField: NonEmptyString
+    options: list[ClarificationOption] | None = None
 
 
 class UnsupportedRequestResult(InternalModel):

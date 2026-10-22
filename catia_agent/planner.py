@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import PureWindowsPath
 from typing import Any
 
@@ -11,6 +12,7 @@ from catia_agent.config import settings
 from catia_agent.gpm_catalog import (
     normalize_title,
     resolve_master_drawing_title,
+    resolve_master_drawing_title_in_text,
 )
 from catia_agent.logging_config import Stopwatch, get_logger, log_event
 from catia_agent.model_providers import (
@@ -24,6 +26,7 @@ from catia_agent.model_providers import (
 from catia_agent.models import (
     ActionRequiredResult,
     CatiaContext,
+    ClarificationOption,
     ClarificationRequiredResult,
     CloseCadDocumentAction,
     CompleteRequestAction,
@@ -793,6 +796,60 @@ MASTER_DRAWING_PART_NUMBER_QUESTION = (
 )
 
 
+def _build_master_drawing_options(
+    candidates: list[dict[str, Any]],
+) -> list[ClarificationOption]:
+    options: list[ClarificationOption] = []
+    for candidate in candidates:
+        label_title = str(
+            candidate.get("plmStandardTitle")
+            or candidate.get("componentTitleFamily")
+            or "Matching item"
+        )
+        label_number = str(candidate.get("partNumber", ""))
+        link_label = str(candidate.get("masterDrawingOrOgdLabel") or "")
+        document_kind = (
+            "ogd"
+            if link_label.casefold().startswith("ogd")
+            else "master_drawing"
+        )
+        kind_label = "OGD" if document_kind == "ogd" else "Master drawing"
+        options.append(
+            ClarificationOption(
+                choiceId=candidate["choiceId"],
+                label=f"{label_title} — {kind_label} {label_number}",
+                partNumber=label_number,
+                plmStandardTitle=label_title,
+                componentTitleFamily=candidate.get("componentTitleFamily"),
+                documentKind=document_kind,
+            )
+        )
+    return options
+
+
+def _build_master_drawing_action_arguments(
+    record: dict[str, Any],
+    *,
+    part_title: str,
+) -> dict[str, Any]:
+    return {
+        "partNumber": record["partNumber"],
+        "partRevision": None,
+        "partTitle": part_title,
+        "plmStandardTitle": record["plmStandardTitle"],
+        "masterDrawingOrOgdLabel": record["masterDrawingOrOgdLabel"],
+        "masterDrawingOrOgdUrl": record["masterDrawingOrOgdUrl"],
+    }
+
+
+def _has_explicit_revision(text: str) -> bool:
+    return re.search(
+        r"\b(?:rev(?:ision)?|version)\s+[A-Z0-9][A-Z0-9._-]*\b",
+        text,
+        re.IGNORECASE,
+    ) is not None
+
+
 def _guard_master_drawing_arguments(
     tool_arguments: dict[str, Any],
     user_texts: list[str],
@@ -863,38 +920,24 @@ def _guard_master_drawing_arguments(
             )
 
         if resolution["status"] == "ambiguous":
-            candidate_names = [
-                str(
-                    candidate.get("plmStandardTitle")
-                    or candidate.get("componentTitleFamily")
-                    or "matching item"
-                )
-                for candidate in resolution["candidates"]
-            ]
-            options = "; ".join(candidate_names)
             return ClarificationRequiredResult(
                 status="clarification_required",
                 message=(
                     f"I found multiple master-drawing matches for "
-                    f"'{part_title}': {options}. Which one do you mean?"
+                    f"'{part_title}'. Select the drawing you mean."
                 ),
                 missingField="partTitle",
+                options=_build_master_drawing_options(
+                    resolution["candidates"]
+                ),
             )
 
         record = resolution["record"]
         tool_arguments.update(
-            {
-                "partNumber": record["partNumber"],
-                "partRevision": None,
-                "partTitle": part_title,
-                "plmStandardTitle": record["plmStandardTitle"],
-                "masterDrawingOrOgdLabel": (
-                    record["masterDrawingOrOgdLabel"]
-                ),
-                "masterDrawingOrOgdUrl": (
-                    record["masterDrawingOrOgdUrl"]
-                ),
-            }
+            _build_master_drawing_action_arguments(
+                record,
+                part_title=part_title,
+            )
         )
         log_event(
             logger,
@@ -1266,6 +1309,59 @@ async def plan_catia_action(
             },
         )
         raise
+
+    if isinstance(
+        typed_action,
+        RequestClarificationAction,
+    ):
+        if (
+            typed_action.arguments.missingField == "partNumber"
+            and not _has_explicit_revision(normalized_command)
+        ):
+            clarification_text = (
+                normalized_command
+                + " "
+                + typed_action.arguments.question
+            )
+            clarification_tokens = set(
+                normalize_title(clarification_text).split()
+            )
+            if {"drawing", "ogd"} & clarification_tokens:
+                title_resolution = resolve_master_drawing_title_in_text(
+                    clarification_text
+                )
+                if title_resolution["status"] == "matched":
+                    record = title_resolution["record"]
+                    typed_action = create_typed_action(
+                        tool_name="open_master_drawing",
+                        tool_arguments=(
+                            _build_master_drawing_action_arguments(
+                                record,
+                                part_title=str(
+                                    record["plmStandardTitle"]
+                                ),
+                            )
+                        ),
+                    )
+                    log_event(
+                        logger,
+                        "master_drawing_title_resolved_from_clarification",
+                        partNumber=record["partNumber"],
+                        matchedTitle=record["plmStandardTitle"],
+                        matchScore=title_resolution["score"],
+                    )
+                elif title_resolution["status"] == "ambiguous":
+                    return ClarificationRequiredResult(
+                        status="clarification_required",
+                        message=(
+                            "I found multiple master-drawing matches in "
+                            "the catalog. Select the drawing you mean."
+                        ),
+                        missingField="partTitle",
+                        options=_build_master_drawing_options(
+                            title_resolution["candidates"]
+                        ),
+                    )
 
     if isinstance(
         typed_action,

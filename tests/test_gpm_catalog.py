@@ -4,6 +4,7 @@ from catia_agent.gpm_catalog import (
     is_approved_drawing_url,
     load_master_drawing_catalog,
     resolve_master_drawing_title,
+    resolve_master_drawing_title_in_text,
 )
 
 
@@ -53,6 +54,24 @@ def test_unknown_title_does_not_guess_a_drawing() -> None:
     result = resolve_master_drawing_title("unknown component name")
 
     assert result == {"status": "not_found", "candidates": []}
+
+
+def test_catalog_title_is_found_inside_an_action_sentence() -> None:
+    result = resolve_master_drawing_title_in_text(
+        "Can you please open backshell?"
+    )
+
+    assert result["status"] == "matched"
+    assert result["record"]["partNumber"] == "6481212"
+
+
+def test_catalog_title_in_action_sentence_returns_multiple_choices() -> None:
+    result = resolve_master_drawing_title_in_text(
+        "Open the master drawing for spring dab retention in SW ASW8."
+    )
+
+    assert result["status"] == "ambiguous"
+    assert len(result["candidates"]) == 3
 
 
 def test_drawing_url_allowlist_rejects_other_document_links() -> None:

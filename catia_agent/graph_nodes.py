@@ -17,6 +17,7 @@ from catia_agent.models import (
     ActionExecutionResultRequest,
     ActionRequiredResult,
     NonAgenticResult,
+    OpenMasterDrawingAction,
     PlannerResult,
     RequestCompletedResult,
     UnsupportedRequestResult,
@@ -70,6 +71,21 @@ async def _plan_action(
                     requestedCapability=None,
                     reason="action_limit_reached",
                 )
+            )
+        }
+
+    preplanned_action = state.get("preplanned_action")
+    if not completed_actions and preplanned_action is not None:
+        action = OpenMasterDrawingAction.model_validate(
+            {
+                "action": "open_master_drawing",
+                "arguments": preplanned_action,
+            }
+        )
+        return {
+            "planner_result": ActionRequiredResult(
+                status="action_required",
+                action=action,
             )
         }
 

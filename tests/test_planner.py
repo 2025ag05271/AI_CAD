@@ -1063,6 +1063,116 @@ async def test_open_master_drawing_drops_invented_revision(
     assert result.action.arguments.partRevision is None
 
 
+@pytest.mark.asyncio
+async def test_part_number_clarification_resolves_title_from_user_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = {
+        "message": {
+            "tool_calls": [
+                _tool_call(
+                    "request_clarification",
+                    {
+                        "question": (
+                            "What is the part number or part title for "
+                            "the backshell drawing you want to open?"
+                        ),
+                        "missingField": "partNumber",
+                    },
+                )
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        AsyncMock(return_value=response),
+    )
+
+    result = await plan_catia_action(
+        user_command="Can you please open backshell?",
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.action == "open_master_drawing"
+    assert result.action.arguments.partNumber == "6481212"
+    assert result.action.arguments.masterDrawingOrOgdUrl.endswith(
+        "/Drawing%20Print/6481212/*"
+    )
+
+
+@pytest.mark.asyncio
+async def test_part_number_clarification_returns_catalog_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = {
+        "message": {
+            "tool_calls": [
+                _tool_call(
+                    "request_clarification",
+                    {
+                        "question": (
+                            "What part number is the spring dab retention "
+                            "drawing for?"
+                        ),
+                        "missingField": "partNumber",
+                    },
+                )
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        AsyncMock(return_value=response),
+    )
+
+    result = await plan_catia_action(
+        user_command=(
+            "Open the master drawing for spring dab retention in SW ASW8."
+        ),
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "partTitle"
+    assert len(result.options or []) == 3
+    assert {option.partNumber for option in result.options or []} == {
+        "6446798",
+        "6471900",
+        "6557983",
+    }
+
+
+@pytest.mark.asyncio
+async def test_title_clarification_does_not_ignore_explicit_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = {
+        "message": {
+            "tool_calls": [
+                _tool_call(
+                    "request_clarification",
+                    {
+                        "question": "Which part number?",
+                        "missingField": "partNumber",
+                    },
+                )
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        "catia_agent.planner.model_client.select_tool",
+        AsyncMock(return_value=response),
+    )
+
+    result = await plan_catia_action(
+        user_command=(
+            "Open the master drawing of backshell revision 01."
+        ),
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.message == "Which part number?"
+
+
 def test_master_drawing_title_guard_injects_catalog_link() -> None:
     arguments = {"partTitle": "backshell"}
 

@@ -123,6 +123,51 @@ def _open_action_result() -> ActionRequiredResult:
     )
 
 
+@pytest.mark.asyncio
+async def test_selected_catalog_option_starts_preplanned_action_without_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_if_planner_called(*_args, **_kwargs):
+        raise AssertionError("Selected catalog choices must not call the model.")
+
+    monkeypatch.setattr(
+        "catia_agent.graph_nodes.plan_catia_action",
+        fail_if_planner_called,
+    )
+    preplanned_action = {
+        "partNumber": "6481212",
+        "partRevision": None,
+        "partTitle": "BACKSHELL, XXX",
+        "plmStandardTitle": "BACKSHELL, XXX",
+        "masterDrawingOrOgdLabel": "6481212",
+        "masterDrawingOrOgdUrl": (
+            "https://plm.autoliv.int/enovia/goto/download/latestreleased/"
+            "Drawing%20Print/6481212/*"
+        ),
+    }
+
+    response = await start_catia_agent(
+        session_id=str(uuid4()),
+        user_message="Can you open the master drawing of backshell?",
+        preplanned_action=preplanned_action,
+    )
+
+    assert response["status"] == "action_required"
+    assert response["action"]["action"] == "open_master_drawing"
+    assert response["action"]["arguments"]["masterDrawingOrOgdUrl"] == (
+        preplanned_action["masterDrawingOrOgdUrl"]
+    )
+
+    failure_result = ActionExecutionResultRequest(
+        actionId=response["actionId"],
+        success=False,
+        errorCode="TEST_ABORTED",
+        errorMessage="Test completed without executing CATIA.",
+    )
+    terminal = await resume_catia_agent(response["runId"], failure_result)
+    assert terminal["status"] == "execution_failed"
+
+
 def test_classify_planning_mode_mixed_verbs_single_catia_intent_fast_path() -> (
     None
 ):

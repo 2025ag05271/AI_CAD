@@ -220,12 +220,14 @@ async def start_catia_agent(
     session_id: str,
     user_message: str,
     catia_context: CatiaContext | None = None,
+    preplanned_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     async with _exclusive_session(session_id):
         return await _start_run(
             session_id,
             user_message,
             catia_context,
+            preplanned_action,
         )
 
 
@@ -233,6 +235,7 @@ async def _start_run(
     session_id: str,
     user_message: str,
     catia_context: CatiaContext | None,
+    preplanned_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     existing_state = _get_existing_state(
         catia_agent_graph,
@@ -274,8 +277,10 @@ async def _start_run(
     )
 
     try:
-        is_agentic = await is_agentic_request(
-            user_message
+        is_agentic = (
+            True
+            if preplanned_action is not None
+            else await is_agentic_request(user_message)
         )
 
         has_explicit_action_shape = (
@@ -299,6 +304,7 @@ async def _start_run(
             "run_id": run_id,
             "user_message": user_message.strip(),
             "catia_context": catia_context,
+            "preplanned_action": preplanned_action,
             "is_agentic_request": is_agentic,
             "messages": (
                 list(

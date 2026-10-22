@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,45 @@ _DRAWING_PATH_TYPES = frozenset({"drawing print", "partdrawing"})
 _ALLOWED_DRAWING_HOST = "plm.autoliv.int"
 _MINIMUM_MATCH_SCORE = 80.0
 _AMBIGUITY_MARGIN = 10.0
+_TITLE_QUERY_STOP_WORDS = frozenset(
+    {
+        "can",
+        "could",
+        "please",
+        "you",
+        "open",
+        "show",
+        "bring",
+        "up",
+        "the",
+        "master",
+        "drawing",
+        "ogd",
+        "of",
+        "for",
+        "me",
+        "a",
+        "an",
+        "this",
+        "want",
+        "to",
+    }
+)
 
 
 def normalize_title(value: str) -> str:
     normalized = normalize("NFKC", value).casefold()
     return " ".join(_WORD_PATTERN.findall(normalized))
+
+
+def catalog_choice_id(record: dict[str, Any]) -> str:
+    stable_value = "\0".join(
+        (
+            str(record.get("partNumber", "")),
+            str(record.get("masterDrawingOrOgdUrl", "")),
+        )
+    )
+    return hashlib.sha256(stable_value.encode("utf-8")).hexdigest()[:24]
 
 
 def is_approved_drawing_url(value: str) -> bool:
@@ -115,6 +150,109 @@ def _score_title_against_record(
     return max(scores, default=0.0)
 
 
+def _resolve_scored_records(
+    scored_records: list[tuple[float, dict[str, Any]]],
+) -> dict[str, Any]:
+    if not scored_records:
+        return {"status": "not_found", "candidates": []}
+
+    scored_records.sort(
+        key=lambda item: (
+            item[0],
+            str(item[1].get("plmStandardTitle", "")),
+        ),
+        reverse=True,
+    )
+    best_score = scored_records[0][0]
+
+    best_destinations: dict[tuple[str, str], dict[str, Any]] = {}
+    for score, record in scored_records:
+        if best_score - score > _AMBIGUITY_MARGIN:
+            break
+        parsed_url = urlsplit(
+            str(record.get("masterDrawingOrOgdUrl", ""))
+        )
+        destination = (
+            str(record.get("partNumber", "")),
+            parsed_url.scheme.casefold(),
+            (parsed_url.hostname or "").casefold(),
+            unquote(parsed_url.path),
+            parsed_url.query,
+        )
+        best_destinations.setdefault(destination, record)
+
+    if len(best_destinations) > 1:
+        candidates = [
+            {
+                "choiceId": catalog_choice_id(record),
+                "componentTitleFamily": record.get("componentTitleFamily"),
+                "plmStandardTitle": record.get("plmStandardTitle"),
+                "partNumber": record.get("partNumber"),
+                "masterDrawingOrOgdLabel": record.get(
+                    "masterDrawingOrOgdLabel"
+                ),
+                "masterDrawingOrOgdUrl": record.get(
+                    "masterDrawingOrOgdUrl"
+                ),
+            }
+            for record in best_destinations.values()
+        ]
+        return {"status": "ambiguous", "candidates": candidates}
+
+    return {
+        "status": "matched",
+        "record": next(iter(best_destinations.values())),
+        "score": best_score,
+    }
+
+
+def resolve_master_drawing_title_in_text(
+    text: str,
+    *,
+    catalog_path: Path = CATALOG_PATH,
+) -> dict[str, Any]:
+    """Find catalog phrases explicitly present in a command/clarification."""
+
+    query_tokens = set(normalize_title(text).split()) - _TITLE_QUERY_STOP_WORDS
+    if not query_tokens:
+        return {"status": "not_found", "candidates": []}
+
+    scored_records: list[tuple[float, dict[str, Any]]] = []
+    for record in load_master_drawing_catalog(catalog_path):
+        phrases = [
+            *record.get("titleAliases", []),
+            *record.get("keywords", []),
+            record.get("componentTitleFamily", ""),
+        ]
+        score = 0.0
+        for phrase in phrases:
+            phrase_tokens = set(normalize_title(str(phrase)).split())
+            phrase_tokens.discard("xxx")
+            if phrase_tokens and phrase_tokens <= query_tokens:
+                score = max(
+                    score,
+                    _score_title_against_record(
+                        " ".join(phrase_tokens),
+                        record,
+                    ),
+                )
+        if score >= _MINIMUM_MATCH_SCORE:
+            scored_records.append((score, record))
+
+    return _resolve_scored_records(scored_records)
+
+
+def resolve_master_drawing_choice(
+    choice_id: str,
+    *,
+    catalog_path: Path = CATALOG_PATH,
+) -> dict[str, Any] | None:
+    for record in load_master_drawing_catalog(catalog_path):
+        if catalog_choice_id(record) == choice_id:
+            return record
+    return None
+
+
 def resolve_master_drawing_title(
     title: str,
     *,
@@ -139,44 +277,40 @@ def resolve_master_drawing_title(
         if score >= _MINIMUM_MATCH_SCORE:
             scored_records.append((score, record))
 
-    if not scored_records:
+    return _resolve_scored_records(scored_records)
+
+
+def resolve_master_drawing_title_in_text(
+    text: str,
+    *,
+    catalog_path: Path = CATALOG_PATH,
+) -> dict[str, Any]:
+    """Resolve catalog phrases found literally in a command Qwen clarifies."""
+
+    query_tokens = set(normalize_title(text).split()) - _TITLE_QUERY_STOP_WORDS
+    if not query_tokens:
         return {"status": "not_found", "candidates": []}
 
-    scored_records.sort(
-        key=lambda item: (
-            item[0],
-            str(item[1].get("plmStandardTitle", "")),
-        ),
-        reverse=True,
-    )
-    best_score = scored_records[0][0]
-
-    # Several standard-title variants can refer to the same drawing.
-    # Treat those as one destination; only ask for clarification when
-    # similarly scoring candidates lead to different CATIA documents.
-    best_destinations: dict[tuple[str, str], dict[str, Any]] = {}
-    for score, record in scored_records:
-        if best_score - score > _AMBIGUITY_MARGIN:
-            break
-        destination = (
-            str(record.get("partNumber", "")),
-            str(record.get("masterDrawingOrOgdUrl", "")),
-        )
-        best_destinations.setdefault(destination, record)
-
-    if len(best_destinations) > 1:
-        candidates = [
-            {
-                "componentTitleFamily": record.get("componentTitleFamily"),
-                "plmStandardTitle": record.get("plmStandardTitle"),
-                "partNumber": record.get("partNumber"),
-            }
-            for record in best_destinations.values()
+    scored_records: list[tuple[float, dict[str, Any]]] = []
+    for record in load_master_drawing_catalog(catalog_path):
+        phrases = [
+            *record.get("titleAliases", []),
+            *record.get("keywords", []),
+            record.get("componentTitleFamily", ""),
         ]
-        return {"status": "ambiguous", "candidates": candidates}
+        match_score = 0.0
+        for phrase in phrases:
+            phrase_tokens = set(normalize_title(str(phrase)).split())
+            phrase_tokens.discard("xxx")
+            if phrase_tokens and phrase_tokens <= query_tokens:
+                match_score = max(
+                    match_score,
+                    _score_title_against_record(
+                        " ".join(phrase_tokens),
+                        record,
+                    ),
+                )
+        if match_score >= _MINIMUM_MATCH_SCORE:
+            scored_records.append((match_score, record))
 
-    return {
-        "status": "matched",
-        "record": next(iter(best_destinations.values())),
-        "score": best_score,
-    }
+    return _resolve_scored_records(scored_records)

@@ -37,6 +37,7 @@ class CatiaAgentState(TypedDict, total=False):
 
     user_message: str
     catia_context: CatiaContext | None
+    preplanned_action: dict[str, Any] | None
 
     # Set once in start_catia_agent from the embedding intent
     # classifier; None means the classifier did not run or could not

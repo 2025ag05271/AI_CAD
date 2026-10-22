@@ -5,10 +5,13 @@ import json
 import logging
 import os
 import sys
+import time
+from dataclasses import dataclass
+from typing import Annotated
 from typing import Any, Literal
 
 import truststore
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 truststore.inject_into_ssl()
 os.environ["CATIA_AGENT_RUNTIME_MODE"] = "worker"
@@ -19,6 +22,8 @@ from catia_agent.graph import (
     resume_catia_agent,
     start_catia_agent,
 )
+from catia_agent.config import settings
+from catia_agent.gpm_catalog import resolve_master_drawing_choice
 from catia_agent.logging_config import (
     bind_logging_context,
     get_logger,
@@ -39,6 +44,10 @@ from catia_agent.intent_classifier import warmup_intent_classifier
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 1_048_576
+CHOICE_ID = Annotated[
+    str,
+    StringConstraints(pattern=r"^[0-9a-f]{24}$"),
+]
 
 logger = get_logger(__name__)
 
@@ -48,7 +57,12 @@ class WorkerRequest(BaseModel):
 
     protocolVersion: Literal[1]
     requestId: RequestIdentifier
-    type: Literal["start_run", "action_result", "shutdown"]
+    type: Literal[
+        "start_run",
+        "action_result",
+        "select_catalog_option",
+        "shutdown",
+    ]
     payload: dict[str, Any] = {}
 
 
@@ -57,6 +71,60 @@ class ActionResultPayload(BaseModel):
 
     runId: RequestIdentifier
     actionResult: ActionExecutionResultRequest
+
+
+class CatalogChoicePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sessionId: RequestIdentifier
+    choiceId: CHOICE_ID
+
+
+@dataclass(frozen=True, slots=True)
+class PendingCatalogChoice:
+    session_id: str
+    user_message: str
+    catia_context: Any
+    created_at: float
+
+
+_pending_catalog_choices: dict[str, PendingCatalogChoice] = {}
+
+
+def _remove_pending_choices_for_session(session_id: str) -> None:
+    for choice_id, pending in list(_pending_catalog_choices.items()):
+        if pending.session_id == session_id:
+            _pending_catalog_choices.pop(choice_id, None)
+
+
+def _remember_catalog_choices(
+    *,
+    session_id: str,
+    user_message: str,
+    catia_context: Any,
+    response: dict[str, Any],
+) -> None:
+    _remove_pending_choices_for_session(session_id)
+    expires_before = (
+        time.monotonic() - settings.pending_run_timeout_seconds
+    )
+    for choice_id, pending in list(_pending_catalog_choices.items()):
+        if pending.created_at < expires_before:
+            _pending_catalog_choices.pop(choice_id, None)
+
+    clarification_options = response.get("options") or []
+    for option in clarification_options:
+        choice_id = option.get("choiceId")
+        if not isinstance(choice_id, str):
+            continue
+        if resolve_master_drawing_choice(choice_id) is None:
+            continue
+        _pending_catalog_choices[choice_id] = PendingCatalogChoice(
+            session_id=session_id,
+            user_message=user_message,
+            catia_context=catia_context,
+            created_at=time.monotonic(),
+        )
 
 
 def _write_message(message: dict[str, Any]) -> None:
@@ -125,10 +193,88 @@ async def handle_message(
                 agent_request = AgentRunRequest.model_validate(
                     request.payload
                 )
+                _remove_pending_choices_for_session(
+                    agent_request.sessionId
+                )
                 result = await start_catia_agent(
                     session_id=agent_request.sessionId,
                     user_message=agent_request.message,
                     catia_context=agent_request.catiaContext,
+                )
+                if result.get("status") == "clarification_required":
+                    _remember_catalog_choices(
+                        session_id=agent_request.sessionId,
+                        user_message=agent_request.message,
+                        catia_context=agent_request.catiaContext,
+                        response=result,
+                    )
+            elif request.type == "select_catalog_option":
+                choice_request = CatalogChoicePayload.model_validate(
+                    request.payload
+                )
+                pending = _pending_catalog_choices.get(
+                    choice_request.choiceId
+                )
+                if (
+                    pending is None
+                    or pending.session_id != choice_request.sessionId
+                    or time.monotonic() - pending.created_at
+                    > settings.pending_run_timeout_seconds
+                ):
+                    _pending_catalog_choices.pop(
+                        choice_request.choiceId,
+                        None,
+                    )
+                    return (
+                        _error_response(
+                            request.requestId,
+                            status=404,
+                            error_code="CATALOG_CHOICE_NOT_FOUND",
+                            message=(
+                                "The selected catalog option is no longer "
+                                "available. Please repeat the title request."
+                            ),
+                        ),
+                        False,
+                    )
+
+                _pending_catalog_choices.pop(
+                    choice_request.choiceId,
+                    None,
+                )
+                record = resolve_master_drawing_choice(
+                    choice_request.choiceId
+                )
+                if record is None:
+                    return (
+                        _error_response(
+                            request.requestId,
+                            status=404,
+                            error_code="CATALOG_CHOICE_NOT_FOUND",
+                            message=(
+                                "The selected catalog option is no longer "
+                                "available. Please repeat the title request."
+                            ),
+                        ),
+                        False,
+                    )
+
+                result = await start_catia_agent(
+                    session_id=pending.session_id,
+                    user_message=pending.user_message,
+                    catia_context=pending.catia_context,
+                    preplanned_action={
+                        "partNumber": record["partNumber"],
+                        "partRevision": None,
+                        "partTitle": record["plmStandardTitle"],
+                        "plmStandardTitle": record["plmStandardTitle"],
+                        "masterDrawingOrOgdLabel": (
+                            record["masterDrawingOrOgdLabel"]
+                        ),
+                        "masterDrawingOrOgdUrl": (
+                            record["masterDrawingOrOgdUrl"]
+                        ),
+                    },
                 )
             else:
                 action_payload = ActionResultPayload.model_validate(

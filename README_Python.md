@@ -1160,8 +1160,15 @@ for the external WPF and C# executor.
 
 ```text
 open_master_drawing     Prepare opening the master drawing of a part.
-                        partNumber is required; partRevision is optional.
+                        Accepts partNumber/revision or a partTitle resolved
+                        from the bundled GPM catalog.
 ```
+
+Ambiguous title matches produce `clarification_required` with a
+structured `options` list. The worker retains option IDs for the
+originating session; .NET can present them as clickable choices and send
+the selected `choiceId` back. The worker resolves that one-time ID from
+the trusted catalog and creates the action without another model call.
 
 The remaining tool descriptions and MCP implementation notes in this
 section document retired prototype capabilities and are not exposed by
