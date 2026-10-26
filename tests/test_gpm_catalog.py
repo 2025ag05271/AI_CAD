@@ -30,6 +30,31 @@ def test_backshell_title_resolves_to_drawing_number_and_hyperlink() -> None:
     )
 
 
+def test_drawing_task_words_are_removed_from_catalog_title_query() -> None:
+    result = resolve_master_drawing_title("deco part garnish drawing")
+
+    assert result["status"] == "matched"
+    assert result["record"]["plmStandardTitle"] == "DECO PART GARNISH, XXX"
+    assert result["record"]["partNumber"] == "6481213"
+
+
+def test_fabric_roll_query_resolves_to_fabric_drawing() -> None:
+    result = resolve_master_drawing_title("fabric roll")
+
+    assert result["status"] == "matched"
+    assert result["record"]["partNumber"] == "6536096"
+    assert result["record"]["masterDrawingOrOgdUrl"].endswith(
+        "/PartDrawing/6536096/%2a"
+    )
+
+
+def test_label_roll_query_still_resolves_to_label_drawing() -> None:
+    result = resolve_master_drawing_title("label roll")
+
+    assert result["status"] == "matched"
+    assert result["record"]["partNumber"] == "6353331"
+
+
 def test_back_shell_lid_title_selects_the_more_specific_record() -> None:
     result = resolve_master_drawing_title("backshell lid")
 
@@ -63,6 +88,15 @@ def test_catalog_title_is_found_inside_an_action_sentence() -> None:
 
     assert result["status"] == "matched"
     assert result["record"]["partNumber"] == "6481212"
+
+
+def test_fabric_roll_is_found_inside_an_action_sentence() -> None:
+    result = resolve_master_drawing_title_in_text(
+        "Open fabric roll drawing"
+    )
+
+    assert result["status"] == "matched"
+    assert result["record"]["partNumber"] == "6536096"
 
 
 def test_catalog_title_in_action_sentence_returns_multiple_choices() -> None:

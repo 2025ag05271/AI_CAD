@@ -50,6 +50,17 @@ def normalize_title(value: str) -> str:
     return " ".join(_WORD_PATTERN.findall(normalized))
 
 
+def _normalize_catalog_query(value: str) -> str:
+    tokens = [
+        token
+        for token in normalize_title(value).split()
+        if token not in _TITLE_QUERY_STOP_WORDS
+    ]
+    if "fabric" in tokens:
+        tokens = [token for token in tokens if token != "roll"]
+    return " ".join(tokens)
+
+
 def catalog_choice_id(record: dict[str, Any]) -> str:
     stable_value = "\0".join(
         (
@@ -217,8 +228,42 @@ def resolve_master_drawing_title_in_text(
     if not query_tokens:
         return {"status": "not_found", "candidates": []}
 
+    records = load_master_drawing_catalog(catalog_path)
+    explicit_titles: list[tuple[int, str]] = []
+    for record in records:
+        for phrase in record.get("titleAliases", []):
+            phrase_words = [
+                token
+                for token in normalize_title(str(phrase)).split()
+                if token not in _TITLE_QUERY_STOP_WORDS
+                and token != "xxx"
+            ]
+            phrase_tokens = set(phrase_words)
+            if phrase_tokens and phrase_tokens <= query_tokens:
+                explicit_titles.append(
+                    (len(phrase_tokens), " ".join(phrase_words))
+                )
+
+    if explicit_titles:
+        _, explicit_title = max(explicit_titles)
+        resolution = resolve_master_drawing_title(
+            explicit_title,
+            catalog_path=catalog_path,
+        )
+        if resolution["status"] != "not_found":
+            return resolution
+
+    normalized_query = _normalize_catalog_query(text)
+    if normalized_query:
+        resolution = resolve_master_drawing_title(
+            normalized_query,
+            catalog_path=catalog_path,
+        )
+        if resolution["status"] != "not_found":
+            return resolution
+
     scored_records: list[tuple[float, dict[str, Any]]] = []
-    for record in load_master_drawing_catalog(catalog_path):
+    for record in records:
         phrases = [
             *record.get("titleAliases", []),
             *record.get("keywords", []),
@@ -259,7 +304,7 @@ def resolve_master_drawing_title(
     part_number: str | None = None,
     catalog_path: Path = CATALOG_PATH,
 ) -> dict[str, Any]:
-    normalized_query = normalize_title(title)
+    normalized_query = _normalize_catalog_query(title)
     if not normalized_query:
         return {"status": "not_found", "candidates": []}
 
@@ -280,37 +325,3 @@ def resolve_master_drawing_title(
     return _resolve_scored_records(scored_records)
 
 
-def resolve_master_drawing_title_in_text(
-    text: str,
-    *,
-    catalog_path: Path = CATALOG_PATH,
-) -> dict[str, Any]:
-    """Resolve catalog phrases found literally in a command Qwen clarifies."""
-
-    query_tokens = set(normalize_title(text).split()) - _TITLE_QUERY_STOP_WORDS
-    if not query_tokens:
-        return {"status": "not_found", "candidates": []}
-
-    scored_records: list[tuple[float, dict[str, Any]]] = []
-    for record in load_master_drawing_catalog(catalog_path):
-        phrases = [
-            *record.get("titleAliases", []),
-            *record.get("keywords", []),
-            record.get("componentTitleFamily", ""),
-        ]
-        match_score = 0.0
-        for phrase in phrases:
-            phrase_tokens = set(normalize_title(str(phrase)).split())
-            phrase_tokens.discard("xxx")
-            if phrase_tokens and phrase_tokens <= query_tokens:
-                match_score = max(
-                    match_score,
-                    _score_title_against_record(
-                        " ".join(phrase_tokens),
-                        record,
-                    ),
-                )
-        if match_score >= _MINIMUM_MATCH_SCORE:
-            scored_records.append((match_score, record))
-
-    return _resolve_scored_records(scored_records)

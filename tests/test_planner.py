@@ -1226,6 +1226,65 @@ async def test_open_master_drawing_title_resolves_catalog_link(
 
 
 @pytest.mark.asyncio
+async def test_open_master_drawing_fabric_roll_resolves_catalog_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(
+        monkeypatch,
+        {"partTitle": "fabric roll"},
+    )
+
+    result = await plan_catia_action(
+        user_command="Open fabric roll drawing.",
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.arguments.partNumber == "6536096"
+    assert result.action.arguments.masterDrawingOrOgdUrl.endswith(
+        "/PartDrawing/6536096/%2a"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_recovers_title_from_explicit_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(monkeypatch, {})
+
+    result = await plan_catia_action(
+        user_command=(
+            "Can you please open the deco part garnish drawing?"
+        ),
+        planning_mode="single_action_fast_path",
+        planning_mode_confidence="high",
+    )
+
+    assert isinstance(result, ActionRequiredResult)
+    assert result.action.arguments.partNumber == "6481213"
+    assert result.action.arguments.plmStandardTitle == (
+        "DECO PART GARNISH, XXX"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_master_drawing_text_fallback_preserves_revision_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_master_drawing_call(monkeypatch, {})
+
+    result = await plan_catia_action(
+        user_command=(
+            "Open the master drawing for deco part garnish revision 02."
+        ),
+        planning_mode="single_action_fast_path",
+        planning_mode_confidence="high",
+    )
+
+    assert isinstance(result, ClarificationRequiredResult)
+    assert result.missingField == "partNumber"
+
+
+@pytest.mark.asyncio
 async def test_open_master_drawing_ambiguous_title_asks_for_clarification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

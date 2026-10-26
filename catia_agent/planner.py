@@ -853,6 +853,8 @@ def _has_explicit_revision(text: str) -> bool:
 def _guard_master_drawing_arguments(
     tool_arguments: dict[str, Any],
     user_texts: list[str],
+    *,
+    allow_text_title_fallback: bool = False,
 ) -> ClarificationRequiredResult | None:
     """
     Resolve explicit identifiers or find a unique master-drawing row
@@ -874,6 +876,42 @@ def _guard_master_drawing_arguments(
     part_number_was_explicit = bool(
         part_number and part_number.upper() in user_text_upper
     )
+
+    if (
+        allow_text_title_fallback
+        and not part_number
+        and not part_title
+        and not _has_explicit_revision(user_text)
+    ):
+        resolution = resolve_master_drawing_title_in_text(user_text)
+        if resolution["status"] == "matched":
+            record = resolution["record"]
+            tool_arguments.update(
+                _build_master_drawing_action_arguments(
+                    record,
+                    part_title=record["plmStandardTitle"],
+                )
+            )
+            log_event(
+                logger,
+                "master_drawing_title_resolved_from_user_text",
+                partNumber=record["partNumber"],
+                matchedTitle=record["plmStandardTitle"],
+                matchScore=resolution["score"],
+            )
+            return None
+        if resolution["status"] == "ambiguous":
+            return ClarificationRequiredResult(
+                status="clarification_required",
+                message=(
+                    "I found multiple master-drawing matches in the "
+                    "catalog. Select the drawing you mean."
+                ),
+                missingField="partTitle",
+                options=_build_master_drawing_options(
+                    resolution["candidates"]
+                ),
+            )
 
     if part_title and not part_number_was_explicit:
         normalized_title = normalize_title(part_title)
@@ -1289,6 +1327,10 @@ async def plan_catia_action(
                     if message.get("role") == "user"
                 ),
             ],
+            allow_text_title_fallback=(
+                planning_mode == "single_action_fast_path"
+                and planning_mode_confidence == "high"
+            ),
         )
 
         if clarification is not None:
